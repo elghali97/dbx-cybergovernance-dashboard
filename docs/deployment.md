@@ -93,6 +93,7 @@ date, Python must compile, and every optional system table needs a fallback.
   `USE SCHEMA` + `SELECT` on the schema plus `USE CATALOG` when allowed. The job log prints a warning with the
   statement to run if a grant could not be applied.
 - **Weekly report:** create the Genie One scheduled task, see [weekly-report.md](weekly-report.md).
+- **Splunk (optional):** live activity and posture dashboards plus alerts in Splunk Enterprise, see [splunk.md](splunk.md).
 - **Several metastores (regions):** the audit log is account-wide, but `information_schema` is per metastore.
   Deploy once in a workspace of each metastore.
 

@@ -22,6 +22,7 @@
 | State tables | `workspaces`, `uc_grants`, `securable_owners`, `governed_tags`, `tag_assignments`, `abac_policies`, `fine_grained_controls`, `sensitive_columns`, `table_governance_coverage`, `delta_sharing_posture`, `compute_posture` | `src_<name>` views | rebuilt every run |
 | Semantic views | `failed_auth_events`, `identity_changes`, `token_events`, `ip_access_list_changes`, `uc_permission_changes`, `workspace_acl_changes`, `tag_changes`, `policy_changes`, `data_export_events`, `workspace_config_changes`, `workspace_config_latest` | `src/sql/20_semantic.sql` | views over `audit_security_events` |
 | Posture | `security_checks`, `security_findings`, `security_findings_latest`, `check_results`, `posture_score`, `posture_snapshots`, `posture_trend`, `activity_kpis_daily`, `weekly_activity_kpis` | `src/sql/30_findings.sql` | findings materialised every run, one snapshot per day |
+| Live views | `live_<semantic view>` (same definitions over `src_audit_security_events`), `live_security_events`, `live_access_denied_events`, `live_network_denials` | `src/sql/20_semantic.sql` (second variant), `src/sql/40_live.sql` | never: they read `system.access.audit` at query time (about 10 minutes behind), for the [Splunk app](splunk.md) |
 
 Every table and view has a description. The Genie agent relies on these descriptions, so keep them accurate when you
 change a definition.
@@ -44,6 +45,13 @@ change a definition.
 6. **Findings:** materialises `security_findings_latest` and writes today's row in `posture_snapshots`.
 
 It logs one line per step with its duration and result.
+
+**Live views.** `20_semantic.sql` is rendered twice (`SEMANTIC_VARIANTS` in `refresh.py`): over the materialised
+`audit_security_events` for the dashboard, Genie and the checks, and as `live_*` views over `src_audit_security_events`,
+which read the audit log when queried. `live_security_events` (`40_live.sql`) is one feed of all security events with
+a `category` and a `signal` (HIGH / MEDIUM / INFO), computed in a single scan of the audit log (a union of the topic
+views would scan it once per topic: 6 seconds instead of 100 for a day on a large account). Its rules mirror the topic
+views: keep them in sync. Live queries must filter on `event_date` (partition pruning) and `event_time`.
 
 ## Publish task (`src/publish.py`)
 

@@ -2,6 +2,8 @@
 .databricks/
 # Answers saved by deploy.sh (per target)
 .deploy.*.json
+# Packages built by tools/build_splunk.py --package
+dist/
 # Python / editors
 __pycache__/
 *.pyc

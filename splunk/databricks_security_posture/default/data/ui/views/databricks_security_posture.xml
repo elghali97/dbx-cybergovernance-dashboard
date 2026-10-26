@@ -1,0 +1,286 @@
+<form version="1.1" theme="dark" hideEdit="false">
+  <label>Databricks Security - Posture</label>
+  <description>Security posture of the Databricks estate: 32 checks modelled on the Security Analysis Tool, scored and refreshed by the Databricks Security Posture job (every 6 hours by default). Click a check title for the Databricks security best practice, a recommendation for the remediation documentation.</description>
+  <init>
+    <!-- Settings: Databricks Add-on account, schema of the Security Posture bundle, optional SQL warehouse (default: the warehouse configured on the add-on account) -->
+    <set token="dbx_account">databricks</set>
+    <set token="sp">security.security_posture</set>
+    <set token="dbx_warehouse"> </set>
+  </init>
+  <search id="kpi">
+    <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT s.score_pct, round(coalesce(t.score_pct, s.score_pct), 1) AS score_pct_7d_ago, s.checks, s.checks_failed, s.high_checks_failed, s.high_findings, s.medium_findings, s.low_findings, s.total_findings, round((unix_timestamp(current_timestamp()) - unix_timestamp(r.refreshed_at)) / 3600, 1) AS hours_since_refresh FROM $sp$.posture_score s CROSS JOIN (SELECT max(refreshed_at) AS refreshed_at FROM $sp$.security_findings_latest) r LEFT JOIN (SELECT score_pct FROM $sp$.posture_trend WHERE snapshot_date <= current_date() - 7 ORDER BY snapshot_date DESC LIMIT 1) t ON TRUE WHERE s.category = 'ALL'"]]></query>
+    <refresh>30m</refresh>
+    <refreshType>delay</refreshType>
+  </search>
+  <fieldset submitButton="false" autoRun="true">
+    <input type="dropdown" token="category" searchWhenChanged="true">
+      <label>Category</label>
+      <choice value="*">All categories</choice>
+      <default>*</default>
+      <fieldForLabel>category</fieldForLabel>
+      <fieldForValue>category</fieldForValue>
+      <search>
+        <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT category FROM $sp$.check_results GROUP BY category ORDER BY min(category_order)"]]></query>
+      </search>
+    </input>
+    <input type="dropdown" token="severity" searchWhenChanged="true">
+      <label>Finding severity</label>
+      <choice value="*">All</choice>
+      <choice value="HIGH">HIGH</choice>
+      <choice value="MEDIUM">MEDIUM</choice>
+      <choice value="LOW">LOW</choice>
+      <default>*</default>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <title>Posture score</title>
+      <single>
+        <search base="kpi">
+          <query><![CDATA[| fields score_pct]]></query>
+        </search>
+        <option name="underLabel">weighted share of passing checks</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+        <option name="useColors">1</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0xd03b3b","0x5c6470","0x0ca30c"]</option>
+        <option name="rangeValues">[50,80]</option>
+        <option name="unit">%</option>
+        <option name="unitPosition">after</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Change vs 7 days ago</title>
+      <single>
+        <search base="kpi">
+          <query><![CDATA[| eval v=round(score_pct - score_pct_7d_ago, 1) | fields v]]></query>
+        </search>
+        <option name="underLabel">score points</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+        <option name="useColors">1</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0xd03b3b","0x5c6470","0x0ca30c"]</option>
+        <option name="rangeValues">[-0.05,0.05]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Checks failing</title>
+      <single>
+        <search base="kpi">
+          <query><![CDATA[| eval v=checks_failed | fields v]]></query>
+        </search>
+        <option name="underLabel">of 32 checks</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+        <option name="useColors">1</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x0ca30c","0xec835a"]</option>
+        <option name="rangeValues">[0]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>HIGH findings</title>
+      <single>
+        <search base="kpi">
+          <query><![CDATA[| fields high_findings]]></query>
+        </search>
+        <option name="underLabel">failing objects</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+        <option name="useColors">1</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x0ca30c","0xd03b3b"]</option>
+        <option name="rangeValues">[0]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>MEDIUM findings</title>
+      <single>
+        <search base="kpi">
+          <query><![CDATA[| fields medium_findings]]></query>
+        </search>
+        <option name="underLabel">failing objects</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+        <option name="useColors">1</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x0ca30c","0xec835a"]</option>
+        <option name="rangeValues">[0]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Data age</title>
+      <single>
+        <search base="kpi">
+          <query><![CDATA[| fields hours_since_refresh]]></query>
+        </search>
+        <option name="underLabel">hours since the last refresh</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+        <option name="useColors">1</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x0ca30c","0xfab219","0xd03b3b"]</option>
+        <option name="rangeValues">[8,24]</option>
+        <option name="unit">h</option>
+        <option name="unitPosition">after</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Posture score trend</title>
+      <chart>
+        <search>
+          <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT unix_timestamp(CAST(snapshot_date AS TIMESTAMP)) AS epoch, score_pct, high_findings, medium_findings, low_findings FROM $sp$.posture_trend WHERE snapshot_date > current_date() - 90 ORDER BY snapshot_date" | eval _time=tonumber(epoch) | timechart span=1d max(score_pct) as "Score %"]]></query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="height">300</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.seriesColors">[0x2a78d6,0xeb6834,0x1baf7a,0xeda100,0xe87ba4,0x008300,0x6250d6,0xe34948,0x4fa3a5,0xa0522d,0x7f8c8d,0xc71585,0x2f4f4f]</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.axisY.minimumNumber">0</option>
+        <option name="charting.axisY.maximumNumber">100</option>
+        <option name="charting.axisTitleX.visibility">collapsed</option>
+        <option name="charting.seriesColors">[0x2a78d6]</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Findings by severity over time</title>
+      <chart>
+        <search>
+          <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT unix_timestamp(CAST(snapshot_date AS TIMESTAMP)) AS epoch, score_pct, high_findings, medium_findings, low_findings FROM $sp$.posture_trend WHERE snapshot_date > current_date() - 90 ORDER BY snapshot_date" | eval _time=tonumber(epoch) | timechart span=1d max(high_findings) as HIGH max(medium_findings) as MEDIUM max(low_findings) as LOW]]></query>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="height">300</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.seriesColors">[0x2a78d6,0xeb6834,0x1baf7a,0xeda100,0xe87ba4,0x008300,0x6250d6,0xe34948,0x4fa3a5,0xa0522d,0x7f8c8d,0xc71585,0x2f4f4f]</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.fieldColors">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</option>
+        <option name="charting.axisTitleX.visibility">collapsed</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Category scorecard</title>
+      <table>
+        <search>
+          <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT category, min(category_order) AS category_order, round(100 * sum(CASE WHEN status = 'PASS' THEN severity_weight ELSE 0 END) / sum(severity_weight), 1) AS score_pct, count(*) AS checks, count_if(status = 'FAIL') AS failing, count_if(status = 'FAIL' AND severity = 'HIGH') AS high_failing, count_if(status = 'FAIL' AND severity = 'MEDIUM') AS medium_failing, count_if(status = 'FAIL' AND severity = 'LOW') AS low_failing, sum(findings) AS findings FROM $sp$.check_results GROUP BY category ORDER BY category_order"]]></query>
+        </search>
+        <option name="count">10</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">none</option>
+        <fields>category, score_pct, checks, failing, high_failing, medium_failing, low_failing, findings</fields>
+        <format type="color" field="high_failing">
+          <colorPalette type="minMidMax" maxColor="#d03b3b" minColor="#FFFFFF"/>
+          <scale type="minMidMax"/>
+        </format>
+        <format type="color" field="medium_failing">
+          <colorPalette type="minMidMax" maxColor="#ec835a" minColor="#FFFFFF"/>
+          <scale type="minMidMax"/>
+        </format>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Security checks</title>
+      <description>Click a title: Databricks security best practice. Click a recommendation: remediation documentation.</description>
+      <table>
+        <search>
+          <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT status, severity, check_id, category, title, findings, affected_workspaces, recommendation, sat_reference, best_practice_url, doc_url FROM $sp$.check_results WHERE ('$category$' = '*' OR category = '$category$') ORDER BY status = 'FAIL' DESC, severity_order, findings DESC, check_id"]]></query>
+        </search>
+        <option name="count">32</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>status, severity, check_id, category, title, findings, affected_workspaces, recommendation, sat_reference</fields>
+        <format type="color" field="status">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="title">
+            <link target="_blank">$row.best_practice_url|n$</link>
+          </condition>
+          <condition field="recommendation">
+            <link target="_blank">$row.doc_url|n$</link>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Findings</title>
+      <description>Every failing object at the last refresh, filtered by category and severity.</description>
+      <table>
+        <search>
+          <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT severity, check_id, title, category, workspace_name, object_type, object_name, detail, unix_timestamp(detected_at) AS detected_epoch, recommendation, doc_url FROM $sp$.security_findings_latest WHERE ('$severity$' = '*' OR severity = '$severity$') AND ('$category$' = '*' OR category = '$category$') ORDER BY severity_order, check_id, detected_at DESC LIMIT 2000" | eval detected_at=strftime(tonumber(detected_epoch), "%Y-%m-%d %H:%M")]]></query>
+        </search>
+        <option name="count">20</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>severity, check_id, title, workspace_name, object_type, object_name, detail, detected_at, recommendation</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="recommendation">
+            <link target="_blank">$row.doc_url|n$</link>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Security activity: last 7 days vs previous 7 days</title>
+      <table>
+        <search>
+          <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT metric_label, metric_order, sum(CASE WHEN event_date > current_date() - 7 THEN value ELSE 0 END) AS last_7_days, sum(CASE WHEN event_date <= current_date() - 7 THEN value ELSE 0 END) AS previous_7_days FROM $sp$.activity_kpis_daily WHERE event_date > current_date() - 14 GROUP BY metric_label, metric_order ORDER BY metric_order" | eval change=last_7_days - previous_7_days]]></query>
+        </search>
+        <option name="count">30</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">none</option>
+        <fields>metric_label, last_7_days, previous_7_days, change</fields>
+      </table>
+    </panel>
+    <panel>
+      <html>
+        <h3>Go further</h3>
+        <ul>
+          <li>
+            <a href="https://www.databricks.com/trust/security-features/best-practices" target="_blank">Databricks security best practices</a>
+          </li>
+          <li>
+            <a href="databricks_security_live">Live activity dashboard</a>
+          </li>
+          <li>Ask questions in natural language: the <b>Security Posture Analyst</b> Genie agent in Databricks.</li>
+        </ul>
+      </html>
+    </panel>
+  </row>
+</form>

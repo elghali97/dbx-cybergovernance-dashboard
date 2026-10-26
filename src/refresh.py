@@ -8,8 +8,10 @@
 3. Loads the activity tables incrementally: the last --reprocess-days days are replaced atomically
    (INSERT ... REPLACE WHERE), the first load back-fills --events-backfill-days / --activity-backfill-days,
    rows older than --retention-days are purged. A table whose schema no longer matches its src_* view is rebuilt.
-4. Creates the semantic views and checks (sql/20_*.sql, sql/30_*.sql).
-5. Materialises security_findings_latest and the daily posture snapshot.
+4. Creates the semantic views and checks (sql/20_*.sql, sql/30_*.sql). The semantic views exist twice: over the
+   materialised events, and as live_* views reading system.access.audit at query time (SEMANTIC_VARIANTS).
+5. Creates the live views of the Splunk dashboards (sql/40_*.sql).
+6. Materialises security_findings_latest and the daily posture snapshot.
 """
 import argparse
 import glob
@@ -69,19 +71,31 @@ ACTIVITY_TABLES = {
     "table_access_activity": "activity",
 }
 
+# Files using ${events} (20_semantic.sql) are rendered once per variant: over the materialised events (dashboard, Genie,
+# checks) and as live_* views over system.access.audit, read at query time by the near real-time Splunk dashboards.
+SEMANTIC_VARIANTS = [
+    {"live": "", "events": "audit_security_events", "live_note": ""},
+    {"live": "live_", "events": "src_audit_security_events",
+     "live_note": "LIVE view: reads system.access.audit at query time (about 10 minutes behind), always filter on event_date "
+                  "and event_time. "},
+]
+
 # __file__ is not defined when run as a job spark_python_task; the job passes --sql-dir instead.
 SQL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sql") if "__file__" in globals() else None
 
 
-def render(text, catalog, schema, missing_sources=()):
-    """Fill ${catalog} / ${schema}; ${source:<table>} becomes the table, or an empty typed result if it is missing."""
+def render(text, catalog, schema, missing_sources=(), **values):
+    """Fill ${catalog} / ${schema} and ${<key>} for each value; ${source:<table>} becomes the table, or an empty typed
+    result if it is missing."""
     def source(m):
         table = m.group(1)
         if table not in missing_sources:
             return table
         return "(SELECT " + ", ".join(NULL.format(t, c) for t, c in OPTIONAL_SOURCES[table]) + " WHERE 1 = 0)"
     text = re.sub(r"\$\{source:([\w.]+)\}", source, text)
-    return text.replace("${catalog}", catalog).replace("${schema}", schema)
+    for key, value in {"catalog": catalog, "schema": schema, **values}.items():
+        text = text.replace("${" + key + "}", value)
+    return text
 
 
 def statements(text):
@@ -89,6 +103,13 @@ def statements(text):
         body = "\n".join(l for l in stmt.splitlines() if not l.strip().startswith("--")).strip().rstrip(";")
         if body:
             yield body
+
+
+def file_statements(path, catalog, schema, missing_sources=()):
+    """Rendered statements of a SQL file, once per SEMANTIC_VARIANTS entry if it uses ${events}."""
+    text = open(path).read()
+    for values in SEMANTIC_VARIANTS if "${events}" in text else [{}]:
+        yield from statements(render(text, catalog, schema, missing_sources, **values))
 
 
 def object_name(stmt):
@@ -151,7 +172,7 @@ class Refresher:
     def run_sql_files(self, prefix):
         failures = []
         for path in sorted(glob.glob(os.path.join(self.args.sql_dir, f"{prefix}*.sql"))):
-            for stmt in statements(render(open(path).read(), self.args.catalog, self.args.schema, self.missing_sources)):
+            for stmt in file_statements(path, self.args.catalog, self.args.schema, self.missing_sources):
                 try:
                     self.sql(stmt)
                 except Exception as e:
@@ -239,6 +260,7 @@ def main():
         r.step(f"activity   {name}", lambda name=name, kind=kind: r.load_activity(name, kind))
     r.step("semantic views", lambda: r.run_sql_files("20_"))
     r.step("checks, score & KPI views", lambda: r.run_sql_files("30_"))
+    r.step("live views (Splunk)", lambda: r.run_sql_files("40_"))
     r.step("findings & snapshot", r.refresh_findings)
     print(f"total {round(sum(t for _, t, _ in r.timings), 1)}s")
 

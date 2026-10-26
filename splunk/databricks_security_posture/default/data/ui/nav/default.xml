@@ -1,0 +1,6 @@
+<nav search_view="search" color="#d03b3b">
+  <view name="databricks_security_live" default="true"/>
+  <view name="databricks_security_posture"/>
+  <view name="search"/>
+  <a href="alerts">Alerts</a>
+</nav>

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0
+
+- **Splunk app** (`splunk/`, [docs/splunk.md](docs/splunk.md)) for Splunk Enterprise with the Databricks Add-on for
+  Splunk: *Live activity* dashboard (near real-time, drill-down on actors), *Posture* dashboard, and four alerts (HIGH
+  signal, failed authentication burst, mass export, denied access burst). `tools/build_splunk.py --package` builds the
+  installable app with the customer's add-on account and schema; `tools/check_splunk.py` checks its SQL.
+- **Live views** created by the refresh job: `live_*` variants of every semantic view, and `live_security_events`,
+  `live_access_denied_events`, `live_network_denials`, reading `system.access.audit` at query time (about 10 minutes
+  behind). `live_security_events` classifies every security event with a category and a HIGH / MEDIUM / INFO signal.
+- Semantic views expose `source_ip` (who changed what, from where).
+- **Dashboard guide** ([docs/dashboard](docs/dashboard/README.md)): one page per dashboard page, explaining each
+  visualization, how to read it and what to do; the README maps every page to its coverage and use cases.
+
 ## 1.1.0
 
 - Fix: the first Deploy failed with `cannot create resources.genie_spaces.security_posture_genie ... does not exist`

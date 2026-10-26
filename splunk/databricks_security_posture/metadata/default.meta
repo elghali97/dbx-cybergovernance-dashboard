@@ -1,0 +1,4 @@
+# Dashboards and alerts are readable by every role; only admins can edit them.
+[]
+access = read : [ * ], write : [ admin ]
+export = none

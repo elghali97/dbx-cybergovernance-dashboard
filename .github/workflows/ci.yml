@@ -18,14 +18,18 @@ jobs:
       - name: Python compiles
         run: python -m py_compile src/*.py tools/*.py
 
-      - name: Generated dashboard and Genie agent are up to date
+      - name: Generated dashboard, Genie agent and Splunk app are up to date
         run: |
           python tools/build_dashboard.py
           python tools/build_genie.py
-          git diff --exit-code -- src/dashboards/ src/genie/ || {
-            echo "::error::Generated files are stale: run tools/build_dashboard.py and tools/build_genie.py and commit the result."
+          python tools/build_splunk.py
+          git diff --exit-code -- src/dashboards/ src/genie/ splunk/ || {
+            echo "::error::Generated files are stale: run tools/build_dashboard.py, build_genie.py and build_splunk.py and commit the result."
             exit 1
           }
+
+      - name: Splunk app package builds
+        run: python tools/build_splunk.py --package --out /tmp/splunk-package && tar tzf /tmp/splunk-package/*.tar.gz | head
 
       - name: Every source table placeholder has a fallback
         run: |
@@ -33,7 +37,8 @@ jobs:
           import re, sys
           sys.path.insert(0, "src")
           from refresh import OPTIONAL_SOURCES
-          used = set(re.findall(r"\$\{source:([\w.]+)\}", open("src/sql/10_sources.sql").read()))
+          import glob
+          used = {t for f in glob.glob("src/sql/*.sql") for t in re.findall(r"\$\{source:([\w.]+)\}", open(f).read())}
           missing = used - set(OPTIONAL_SOURCES)
           sys.exit(f"no fallback for {missing}" if missing else 0)
           PY
