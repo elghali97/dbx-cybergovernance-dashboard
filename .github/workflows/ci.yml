@@ -16,13 +16,13 @@ jobs:
           python-version: "3.12"
 
       - name: Python compiles
-        run: python -m py_compile src/refresh.py tools/*.py
+        run: python -m py_compile src/*.py tools/*.py
 
       - name: Generated dashboard and Genie agent are up to date
         run: |
           python tools/build_dashboard.py
           python tools/build_genie.py
-          git diff --exit-code -- resources/ src/dashboards/ || {
+          git diff --exit-code -- src/dashboards/ src/genie/ || {
             echo "::error::Generated files are stale: run tools/build_dashboard.py and tools/build_genie.py and commit the result."
             exit 1
           }

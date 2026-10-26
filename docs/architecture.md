@@ -45,6 +45,19 @@ change a definition.
 
 It logs one line per step with its duration and result.
 
+## Publish task (`src/publish.py`)
+
+Runs after the refresh task:
+- creates or updates the **Genie agent** from `src/genie/security_posture.genie.json` (Genie requires the tables to
+  exist, which is why this is not done at deploy time);
+- creates or updates the **dashboard** from `src/dashboards/security_posture.lvdash.json`, with its datasets pointed at
+  the schema and its Ask Genie button at the agent, and publishes it (without embedded credentials);
+- gives the security group `CAN RUN` on both.
+
+Both live in the bundle's `resources` folder. Their ids and a hash of what was published are stored in
+`published_assets`: unchanged assets are left alone, so UI edits survive the scheduled runs, and a deleted asset is
+created again.
+
 ## Why it is fast
 
 - Consumers never scan `system.access.audit`, which holds hundreds of millions of rows a week at large accounts.

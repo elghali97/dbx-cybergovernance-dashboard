@@ -8978,7 +8978,7 @@
     },
     "genieSpace": {
       "isEnabled": true,
-      "overrideId": "${resources.genie_spaces.security_posture_genie.id}",
+      "overrideId": "${genie_space_id}",
       "enablementMode": "ENABLED"
     }
   }

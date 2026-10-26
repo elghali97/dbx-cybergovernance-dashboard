@@ -35,9 +35,12 @@ deploy with a service principal (option C) and grant it the prerequisites.
    (`warehouse_id: lookup: warehouse: "<your warehouse name>"`).
 3. Open **`databricks.yml`** → **Deployments** pane (rocket icon) → target **prod** → **Deploy** → confirm.
 4. In **Bundle resources**, click ▶ next to **Security Posture - refresh**. The first run takes about 5 to 15
-   minutes because it back-fills the history.
-5. Open **Databricks Security Posture** from Bundle resources, then create the weekly report
-   ([weekly-report.md](weekly-report.md)).
+   minutes because it back-fills the history. Its last task, `publish`, creates the dashboard and the Genie agent
+   (the agent needs the tables to exist, so they cannot be created by Deploy itself).
+5. Open **Databricks Security Posture** from the bundle's `resources` folder (or from the links at the end of the
+   `publish` task output), then create the weekly report ([weekly-report.md](weekly-report.md)).
+
+Deploy only creates the job: the dashboard and the agent appear after the first run.
 
 To upgrade, pull the Git folder, then Deploy again.
 
@@ -95,11 +98,13 @@ date, Python must compile, and every optional system table needs a fallback.
 
 ## Upgrade, change settings, uninstall
 
-- **Upgrade:** get the new version, then Deploy again (any option). Tables whose definition changed are rebuilt
-  automatically on the next refresh run.
+- **Upgrade:** get the new version, then Deploy again (any option). The next refresh run rebuilds the tables whose
+  definition changed and updates the dashboard and the Genie agent if their template changed (an upgrade replaces
+  edits made to them in the UI; scheduled runs do not).
 - **Change settings:** edit `config.yml` or re-run `./deploy.sh` with new flags, then deploy.
-- **Uninstall:** `databricks bundle destroy -t prod` (or **Destroy** in the Deployments pane) removes the dashboard,
-  the Genie agent and the job. The data stays: `DROP SCHEMA <catalog>.security_posture CASCADE`.
+- **Uninstall:** delete the dashboard and the Genie agent (their ids are in `<catalog>.security_posture.published_assets`),
+  then `databricks bundle destroy -t prod` (or **Destroy** in the Deployments pane) removes the job and the files.
+  The data stays: `DROP SCHEMA <catalog>.security_posture CASCADE`.
 
 ## Troubleshooting
 
@@ -110,6 +115,7 @@ date, Python must compile, and every optional system table needs a fallback.
 | Refresh job fails with `Cannot read system.access.audit` | Run `setup/grants.sql` for the identity printed in the error |
 | `Catalog ... does not exist and ... cannot create it` | Create the catalog, or set an existing one in `config.yml` |
 | Deploy fails on permissions with an unknown group | The group must exist in (be assigned to) the workspace |
-| Dashboard tiles show "table not found" | The first refresh has not run yet: run **Security Posture - refresh** |
+| No dashboard / Genie agent after Deploy | Expected: run **Security Posture - refresh** once, its `publish` task creates them |
+| `publish` task fails on the Genie agent | The `refresh` task did not create every table: check its log, fix, run again |
 | Some tiles are always empty | An optional system table is not enabled; the job log lists it as `WARNING ... not enabled or not granted` |
 | Dashboard viewers get permission errors | Grant them `USE CATALOG` on the catalog and `USE SCHEMA` + `SELECT` on the schema |

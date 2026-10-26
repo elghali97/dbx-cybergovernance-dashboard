@@ -62,10 +62,4 @@ jobs:
         run: databricks bundle run -t "${{ inputs.target }}" security_posture_refresh
 
       - name: Links
-        run: |
-          databricks bundle summary -t "${{ inputs.target }}" -o json | python3 -c "
-          import json, sys
-          r = json.load(sys.stdin)['resources']
-          for kind, key in (('dashboards', 'security_posture_dashboard'), ('genie_spaces', 'security_posture_genie'), ('jobs', 'security_posture_refresh')):
-              print(f'{kind:<13} {r.get(kind, {}).get(key, {}).get(\"url\", \"-\")}')
-          " | tee -a "$GITHUB_STEP_SUMMARY"
+        run: python3 tools/links.py -t "${{ inputs.target }}" | tee -a "$GITHUB_STEP_SUMMARY"

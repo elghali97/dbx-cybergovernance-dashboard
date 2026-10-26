@@ -8,7 +8,7 @@ don't have account-admin access. No account API, no secrets, no external tooling
 |---|---|
 | 📊 **Databricks Security Posture** dashboard | 8 SAT-style pages: posture overview with a score, category scorecard and the 32 checks (each linked to the Databricks security best practice and the remediation docs) · findings explorer · identity & authentication · data access control · policies & data protection · tags & metadata · data activity & sharing · compute, network & configuration |
 | 🤖 **Security Posture Analyst** Genie agent | Natural-language questions: *who has access to X, who got admin rights this week, which sensitive columns are unprotected, what changed last week …* Also opens from the dashboard's **Ask Genie** button |
-| 🔄 **Security Posture - refresh** job | Every 6 hours on serverless: incremental, materialised tables, so the dashboard and Genie stay fast at any account size |
+| 🔄 **Security Posture - refresh** job | Every 6 hours on serverless: incremental, materialised tables, so the dashboard and Genie stay fast at any account size. The only bundle resource: its `publish` task creates the dashboard and the agent |
 | 📧 **Weekly report** | A Genie One scheduled task, built on the agent and the dashboard, that emails the posture of the week to the security team ([setup](docs/weekly-report.md)) |
 
 Coverage:
@@ -28,7 +28,7 @@ to the system tables and `BROWSE` on the catalogs; account admin is not required
 
 | | How |
 |---|---|
-| **Workspace UI** (nothing to install) | Workspace → New → **Git folder** from `https://github.com/elghali97/dbx-cybergovernance-dashboard` → set the catalog, group and warehouse in **`config.yml`** → open `databricks.yml` → **Deployments → prod → Deploy** → ▶ **Security Posture - refresh** |
+| **Workspace UI** (nothing to install) | Workspace → New → **Git folder** from `https://github.com/elghali97/dbx-cybergovernance-dashboard` → set the catalog, group and warehouse in **`config.yml`** → open `databricks.yml` → **Deployments → prod → Deploy** → ▶ **Security Posture - refresh** (its first run creates the dashboard and the Genie agent) |
 | **One command** | `git clone https://github.com/elghali97/dbx-cybergovernance-dashboard.git && cd dbx-cybergovernance-dashboard`, `databricks auth login --host https://<workspace>`, then **`./deploy.sh`**. It checks access, asks for the catalog, group and warehouse, deploys, runs the first refresh and prints the links |
 | **GitHub Actions** | Set the service principal secrets and `DATABRICKS_HOST` → Actions → **Deploy Security Posture** → **Run workflow** |
 

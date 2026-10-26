@@ -51,3 +51,7 @@ variables:
   activity_backfill_days:
     description: First-load window of the high-volume daily activity tables (logins, denied access, exports ...).
     default: "90"
+
+  name_prefix:
+    description: Prefix of the dashboard and Genie agent names (set by the dev target so a trial copy is easy to tell apart).
+    default: ""

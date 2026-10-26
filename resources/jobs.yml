@@ -5,7 +5,8 @@ resources:
       description: >-
         Refreshes the security posture tables from Databricks system tables: rebuilds Unity Catalog state
         snapshots, loads audit / lineage / network activity incrementally, recomputes the security findings
-        and appends the daily posture snapshot. The dashboard and the Genie agent read these tables.
+        and appends the daily posture snapshot. The publish task then creates or updates the dashboard and the
+        Genie agent over these tables (in the bundle's resources folder) and shares them with the security group.
       schedule:
         quartz_cron_expression: ${var.refresh_schedule}
         timezone_id: ${var.timezone}
@@ -24,6 +25,20 @@ resources:
               - "--events-backfill-days=${var.events_backfill_days}"
               - "--activity-backfill-days=${var.activity_backfill_days}"
               - "--readers-group=${var.security_group}"
+        - task_key: publish
+          depends_on:
+            - task_key: refresh
+          environment_key: default
+          spark_python_task:
+            python_file: ../src/publish.py
+            parameters:
+              - "--catalog=${var.catalog}"
+              - "--schema=${var.schema}"
+              - "--warehouse-id=${var.warehouse_id}"
+              - "--parent-path=${workspace.resource_path}"
+              - "--assets-dir=${workspace.file_path}/src"
+              - "--readers-group=${var.security_group}"
+              - "--name-prefix=${var.name_prefix}"
       environments:
         - environment_key: default
           spec:

@@ -3,7 +3,8 @@
 
 Checks the tooling and the login, asks for the few deployment settings (or takes them from flags / the last run),
 verifies that the deploying identity can read the system tables and that the security group exists, then deploys
-the bundle, runs the first refresh and prints the links. Re-run it any time to upgrade or change settings.
+the bundle (the refresh job), runs it once (the job creates the tables, then the dashboard and the Genie agent)
+and prints the links. Re-run it any time to upgrade or change settings.
 Standard library only (Python 3.6+).
 """
 import argparse
@@ -14,6 +15,9 @@ import subprocess
 import sys
 import time
 from urllib.parse import urlencode
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from links import links  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 MIN_CLI = (1, 3, 0)
@@ -212,19 +216,13 @@ def main():
     cli("bundle", "deploy", "-t", args.target, *bundle_vars, "--auto-approve", stream=True)
 
     if not args.no_run:
-        step("Running the first refresh (about 5-15 minutes; the first run back-fills the history)")
+        step("Running the first refresh (about 5-15 minutes; the first run back-fills the history, then publishes "
+             "the dashboard and the Genie agent)")
         cli("bundle", "run", "-t", args.target, *bundle_vars, "security_posture_refresh", stream=True)
 
-    summary = cli("bundle", "summary", "-t", args.target, *bundle_vars, "-o", "json")
-    res = summary.get("resources", {})
-    links = {
-        "Dashboard": res.get("dashboards", {}).get("security_posture_dashboard", {}).get("url"),
-        "Genie agent": res.get("genie_spaces", {}).get("security_posture_genie", {}).get("url"),
-        "Refresh job": res.get("jobs", {}).get("security_posture_refresh", {}).get("url"),
-    }
     step("Done")
-    for name, url in links.items():
-        print(f"  {name:<12} {url or '-'}")
+    for name, url in links(args.target, bundle_vars).items():
+        print(f"  {name:<12} {url}")
     print(f"\nNext: create the weekly Genie One scheduled task (docs/weekly-report.md).\n"
           f"Settings saved to {os.path.basename(state_file)}; re-run ./deploy.sh{' --profile ' + args.profile if args.profile else ''}"
           f"{' --target dev' if args.target == 'dev' else ''} --yes to upgrade.")

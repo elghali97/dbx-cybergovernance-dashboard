@@ -1,8 +1,10 @@
 # Databricks Security Posture — dashboard, Genie agent and refresh job built only on system tables.
 # Deployment settings live in config.yml; this file only wires the bundle together.
+# The bundle deploys the refresh job; the job's publish task creates the dashboard and the Genie agent once the
+# tables exist (Genie refuses to create an agent over tables that do not exist yet).
 bundle:
   name: security_posture
-  databricks_cli_version: ">= 1.3.0"   # genie_spaces resources need the direct deployment engine (CLI 1.3+)
+  databricks_cli_version: ">= 1.3.0"
   engine: direct
 
 include:
@@ -25,3 +27,4 @@ targets:
     mode: development
     variables:
       schema: security_posture_dev
+      name_prefix: "[dev ${workspace.current_user.short_name}] "
