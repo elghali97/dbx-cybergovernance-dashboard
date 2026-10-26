@@ -1,0 +1,39 @@
+# Offline checks (no workspace credentials needed): generated files are up to date and Python compiles.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python compiles
+        run: python -m py_compile src/refresh.py tools/*.py
+
+      - name: Generated dashboard and Genie agent are up to date
+        run: |
+          python tools/build_dashboard.py
+          python tools/build_genie.py
+          git diff --exit-code -- resources/ src/dashboards/ || {
+            echo "::error::Generated files are stale: run tools/build_dashboard.py and tools/build_genie.py and commit the result."
+            exit 1
+          }
+
+      - name: Every source table placeholder has a fallback
+        run: |
+          python - <<'PY'
+          import re, sys
+          sys.path.insert(0, "src")
+          from refresh import OPTIONAL_SOURCES
+          used = set(re.findall(r"\$\{source:([\w.]+)\}", open("src/sql/10_sources.sql").read()))
+          missing = used - set(OPTIONAL_SOURCES)
+          sys.exit(f"no fallback for {missing}" if missing else 0)
+          PY

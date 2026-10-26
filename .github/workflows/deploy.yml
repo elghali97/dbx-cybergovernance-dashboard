@@ -1,0 +1,71 @@
+# One-click deployment from GitHub: Actions → "Deploy Security Posture" → Run workflow.
+#
+# Repository (or environment) secrets:  DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET  (service principal OAuth M2M)
+# Repository (or environment) variables:
+#   DATABRICKS_HOST                 https://<workspace-url>                  (required)
+#   SECURITY_POSTURE_CATALOG        catalog for the posture schema            (optional, default in config.yml)
+#   SECURITY_POSTURE_GROUP          security team account group               (optional)
+#   SECURITY_POSTURE_WAREHOUSE_ID   SQL warehouse id                          (optional, default: lookup by name)
+# The service principal deploys and runs the refresh job, so it needs the grants of setup/grants.sql.
+name: Deploy Security Posture
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Bundle target
+        type: choice
+        options: [prod, dev]
+        default: prod
+      run_refresh:
+        description: Run the refresh job after deploying
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target }}
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: databricks/setup-cli@main
+
+      - name: Pass optional settings to the bundle
+        env:
+          CATALOG: ${{ vars.SECURITY_POSTURE_CATALOG }}
+          GROUP: ${{ vars.SECURITY_POSTURE_GROUP }}
+          WAREHOUSE_ID: ${{ vars.SECURITY_POSTURE_WAREHOUSE_ID }}
+        run: |
+          # Only non-empty values: an empty BUNDLE_VAR_* would override the config.yml default with "".
+          [ -n "$CATALOG" ] && echo "BUNDLE_VAR_catalog=$CATALOG" >> "$GITHUB_ENV"
+          [ -n "$GROUP" ] && echo "BUNDLE_VAR_security_group=$GROUP" >> "$GITHUB_ENV"
+          [ -n "$WAREHOUSE_ID" ] && echo "BUNDLE_VAR_warehouse_id=$WAREHOUSE_ID" >> "$GITHUB_ENV"
+          true
+
+      - name: Validate
+        run: databricks bundle validate -t "${{ inputs.target }}"
+
+      - name: Deploy
+        run: databricks bundle deploy -t "${{ inputs.target }}" --auto-approve
+
+      - name: Run the refresh job
+        if: ${{ inputs.run_refresh }}
+        run: databricks bundle run -t "${{ inputs.target }}" security_posture_refresh
+
+      - name: Links
+        run: |
+          databricks bundle summary -t "${{ inputs.target }}" -o json | python3 -c "
+          import json, sys
+          r = json.load(sys.stdin)['resources']
+          for kind, key in (('dashboards', 'security_posture_dashboard'), ('genie_spaces', 'security_posture_genie'), ('jobs', 'security_posture_refresh')):
+              print(f'{kind:<13} {r.get(kind, {}).get(key, {}).get(\"url\", \"-\")}')
+          " | tee -a "$GITHUB_STEP_SUMMARY"

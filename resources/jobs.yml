@@ -1,0 +1,33 @@
+resources:
+  jobs:
+    security_posture_refresh:
+      name: "Security Posture - refresh"
+      description: >-
+        Refreshes the security posture tables from Databricks system tables: rebuilds Unity Catalog state
+        snapshots, loads audit / lineage / network activity incrementally, recomputes the security findings
+        and appends the daily posture snapshot. The dashboard and the Genie agent read these tables.
+      schedule:
+        quartz_cron_expression: ${var.refresh_schedule}
+        timezone_id: ${var.timezone}
+      max_concurrent_runs: 1
+      email_notifications:
+        on_failure: ${var.failure_recipients}
+      tasks:
+        - task_key: refresh
+          environment_key: default
+          spark_python_task:
+            python_file: ../src/refresh.py
+            parameters:
+              - "--catalog=${var.catalog}"
+              - "--schema=${var.schema}"
+              - "--sql-dir=${workspace.file_path}/src/sql"
+              - "--events-backfill-days=${var.events_backfill_days}"
+              - "--activity-backfill-days=${var.activity_backfill_days}"
+              - "--readers-group=${var.security_group}"
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "3"
+      permissions:
+        - level: CAN_VIEW
+          group_name: ${var.security_group}

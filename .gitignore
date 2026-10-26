@@ -1,0 +1,11 @@
+# Bundle deployment state and local variable overrides
+.databricks/
+# Answers saved by deploy.sh (per target)
+.deploy.*.json
+# Python / editors
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+.DS_Store

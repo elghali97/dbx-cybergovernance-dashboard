@@ -1,0 +1,53 @@
+# =============================================================================
+# Deployment settings — the only file to edit before deploying.
+# Every value can also be overridden without editing this file:
+#   databricks bundle deploy --var="catalog=security"      or   export BUNDLE_VAR_catalog=security
+# deploy.sh asks for these values and passes them for you.
+# =============================================================================
+variables:
+  catalog:
+    description: >-
+      Unity Catalog catalog that holds the security_posture schema (created by the refresh job if missing and
+      allowed). Restrict it to the security team.
+    default: security
+
+  schema:
+    description: Schema created in the catalog for the posture tables and views.
+    default: security_posture
+
+  security_group:
+    description: >-
+      Account group of the Cybersecurity team. It gets CAN_RUN on the dashboard and the Genie agent, CAN_VIEW on
+      the refresh job, and read access (USE SCHEMA + SELECT) on the schema. Use an account group: the default
+      workspace-local `admins` group works for sharing but cannot receive Unity Catalog grants.
+    default: admins
+
+  warehouse_id:
+    description: >-
+      SQL warehouse (serverless or pro) used by the dashboard and the Genie agent. Resolved by name; to use an
+      existing warehouse, replace the name below (or pass --var="warehouse_id=<id>").
+    lookup:
+      warehouse: "Serverless Starter Warehouse"
+
+  refresh_schedule:
+    description: Quartz cron expression of the refresh job. Loads are incremental, so frequent runs are cheap.
+    default: "0 0 */6 * * ?"
+
+  timezone:
+    description: Timezone of the refresh schedule.
+    default: Asia/Dubai
+
+  failure_recipients:
+    description: Email addresses notified when the refresh job fails.
+    type: complex
+    default: []
+
+  events_backfill_days:
+    description: >-
+      First-load window of audit_security_events. Workspace settings are reconstructed from it, so keep the audit
+      retention (365 days) unless the first run is too long on a very large account.
+    default: "365"
+
+  activity_backfill_days:
+    description: First-load window of the high-volume daily activity tables (logins, denied access, exports ...).
+    default: "90"
