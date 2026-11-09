@@ -100,7 +100,8 @@ date, Python must compile, and every optional system table needs a fallback.
 ## Upgrade, change settings, uninstall
 
 - **Upgrade:** get the new version, then Deploy again (any option). The next refresh run rebuilds the tables whose
-  definition changed and updates the dashboard and the Genie agent if their template changed (an upgrade replaces
+  definition changed (the first run after an upgrade to 1.3.0 rebuilds all activity tables: about 15 minutes on a large
+  account) and updates the dashboard and the Genie agent if their template changed (an upgrade replaces
   edits made to them in the UI; scheduled runs do not).
 - **Change settings:** edit `config.yml` or re-run `./deploy.sh` with new flags, then deploy.
 - **Uninstall:** delete the dashboard and the Genie agent (their ids are in `<catalog>.security_posture.published_assets`),

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Generate the Splunk app of the Security Posture bundle (splunk/databricks_security_posture).
 
-Two Simple XML dashboards and four alerts, querying the bundle's schema through the `databricksquery` command of the
+Three Simple XML dashboards and three alerts, querying the bundle's schema through the `databricksquery` command of the
 Databricks Add-on for Splunk (TA-Databricks, https://github.com/databrickslabs/splunk-integration):
 
-  databricks_security_live.xml     near real-time activity: live_* views reading system.access.audit at query time
-  databricks_security_posture.xml  posture score, checks and findings: tables refreshed by the bundle's job
-  savedsearches.conf               alerts on the live views (disabled until enabled in Splunk)
+  databricks_security_live.xml        near real-time activity: live_* views reading system.access.audit at query time
+  databricks_security_detections.xml  one panel per SRA use case (detections, sensitive operations, IPs, data usage)
+  databricks_security_posture.xml     posture score, checks and findings: tables refreshed by the bundle's job
+  savedsearches.conf                  alerts on the live views (disabled until enabled in Splunk)
 
 The committed app uses the defaults below. For a customer, generate it with their values and a ready-to-install
 package:   python3 tools/build_splunk.py --account <add-on account> --schema <catalog>.<schema> --package
@@ -21,7 +22,7 @@ from xml.sax.saxutils import escape
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 APP = "databricks_security_posture"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 DEFAULTS = {"account": "databricks", "schema": "security.security_posture", "warehouse_id": ""}
 
 # Palette of the AI/BI dashboard: severity / signal colours are fixed and always shown with their label.
@@ -33,6 +34,12 @@ SEVERITY_COLORS = "{" + ",".join(f'"{k}":{v}' for k, v in (("HIGH", HIGH), ("MED
                                                             ("FAIL", HIGH))) + "}"
 BEST_PRACTICES_URL = "https://www.databricks.com/trust/security-features/best-practices"
 TOKEN = re.compile(r"\$[\w.]+(\|\w)?\$")
+
+
+def short_list(array, n=3):
+    """SQL: first n items of an array, then '+k more' (keeps table rows readable)."""
+    return (f"concat(array_join(slice({array}, 1, {n}), ', '), "
+            f"CASE WHEN size({array}) > {n} THEN concat(' +', CAST(size({array}) - {n} AS STRING), ' more') ELSE '' END)")
 # Actor filter typed by the user -> SQL LIKE pattern ($actor_like$): $actor|s$ quotes it safely for SPL, then quotes and
 # backslashes are removed (they would end the SQL string or the query argument), * becomes %, empty means everything.
 ACTOR_SEARCH = r"""| makeresults | eval v=$actor|s$
@@ -75,6 +82,15 @@ LIVE_QUERIES = {
     "live_freshness": """
         SELECT max(unix_timestamp(event_time)) AS newest FROM $sp$.live_security_events
         WHERE event_date >= current_date() - 1 AND event_time >= current_timestamp() - INTERVAL 1 DAY""",
+    "live_detections": f"""
+        SELECT unix_timestamp(window_start) AS epoch, severity, title, principal, {short_list("workspace_names")} AS workspaces,
+               events, distinct_objects, {short_list("objects")} AS objects, left(sample, 160) AS sample,
+               {short_list("source_ips")} AS source_ips
+        FROM $sp$.live_security_detections
+        WHERE event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND window_end > timestamp_seconds($t_from$)
+          AND window_start < timestamp_seconds($t_to$) AND detection_id <> 'PRINT_STATEMENTS'
+          AND ('$ws$' = '*' OR array_contains(workspace_names, '$ws$')) AND lower(principal) LIKE lower('$actor_like$')
+        ORDER BY severity_order, window_start DESC LIMIT 200""",
     "live_high": f"""
         SELECT unix_timestamp(event_time) AS epoch, workspace_name, category, actor, action_name, target, detail, source_ip
         FROM $sp$.live_security_events
@@ -168,6 +184,159 @@ POSTURE_QUERIES = {
         GROUP BY metric_label, metric_order ORDER BY metric_order""",
 }
 
+
+# ----------------------------------------------------------------------------- detections dashboard
+# Source switch: $src$ = "<schema>." reads the tables refreshed by the job (fast, up to 90 days), "<schema>.live_" the live
+# views (audit log at query time, minutes behind, best for the last hours / days). Both have the same columns. The token
+# carries the schema so that it is never empty (Simple XML treats an empty token as unset).
+DAYS = ("event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND event_date <= CAST(timestamp_seconds($t_to$) AS DATE)")
+DET_WS = "('$ws$' = '*' OR workspace_name = '$ws$')"
+DETECTION_QUERIES = {
+    "det_sensitive": f"""
+        SELECT unix_timestamp(event_time) AS epoch, operation, severity, workspace_name, actor, action_name, target,
+               left(detail, 200) AS detail, source_ip
+        FROM $src$sensitive_operations
+        WHERE {WINDOW} AND {DET_WS} AND lower(coalesce(actor, '')) LIKE lower('$actor_like$')
+        ORDER BY event_time DESC LIMIT 5000""",
+    "det_detections": f"""
+        SELECT unix_timestamp(window_start) AS epoch, detection_id, title, severity, principal,
+               {short_list("workspace_names")} AS workspaces, events, distinct_objects, {short_list("objects")} AS objects,
+               left(sample, 160) AS sample, {short_list("source_ips")} AS source_ips, sra_query
+        FROM $src$security_detections
+        WHERE event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND window_end > timestamp_seconds($t_from$)
+          AND window_start < timestamp_seconds($t_to$)
+          AND ('$ws$' = '*' OR array_contains(workspace_names, '$ws$')) AND lower(principal) LIKE lower('$actor_like$')
+        ORDER BY severity_order, window_start DESC LIMIT 5000""",
+    "det_activity": f"""
+        SELECT activity, principal, count(DISTINCT event_date) AS days, sum(events) AS events,
+               {short_list("array_distinct(flatten(collect_list(objects)))", 4)} AS sample_objects,
+               size(array_distinct(flatten(collect_list(objects)))) AS distinct_objects_seen,
+               {short_list("array_sort(collect_set(workspace_name))")} AS workspaces,
+               left(max(sample), 160) AS sample, max(unix_timestamp(event_hour)) AS last_seen
+        FROM $src$security_activity_hourly
+        WHERE event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND event_hour >= date_trunc('HOUR', timestamp_seconds($t_from$))
+          AND event_hour < timestamp_seconds($t_to$) AND activity IN ('SECRET_READ', 'UC_DATA_DENIED', 'UC_DENIED', 'PRINT_STATEMENT')
+          AND {DET_WS} AND lower(principal) LIKE lower('$actor_like$')
+        GROUP BY activity, principal ORDER BY events DESC LIMIT 5000""",
+    "det_ips": f"""
+        SELECT source_ip, ip_range, access_level, count(DISTINCT principal) AS principals, sum(events) AS events,
+               sum(data_access_events) AS data_access_events, sum(failed_events) AS failed_events,
+               {short_list("array_sort(collect_set(principal))")} AS sample_principals,
+               count(DISTINCT workspace_id) AS workspaces, max(unix_timestamp(CAST(event_date AS TIMESTAMP))) AS last_seen
+        FROM $src$access_footprint_daily
+        WHERE {DAYS} AND source_ip IS NOT NULL AND {DET_WS} AND lower(principal) LIKE lower('$actor_like$')
+        GROUP BY source_ip, ip_range, access_level ORDER BY events DESC LIMIT 5000""",
+    "det_workspaces": f"""
+        SELECT principal, principal_type, count(DISTINCT workspace_id) AS workspaces, count(DISTINCT event_date) AS days,
+               sum(events) AS events, {short_list("array_sort(collect_set(workspace_name))", 4)} AS sample_workspaces
+        FROM $src$access_footprint_daily
+        WHERE {DAYS} AND workspace_id <> '0' AND lower(principal) LIKE lower('$actor_like$')
+        GROUP BY principal, principal_type HAVING count(DISTINCT workspace_id) > 1
+        ORDER BY workspaces DESC, events DESC LIMIT 500""",
+    "det_popular": f"""
+        SELECT table_full_name, count(DISTINCT CASE WHEN access_type = 'READ' THEN principal END) AS readers,
+               sum(CASE WHEN access_type = 'READ' THEN access_events ELSE 0 END) AS reads,
+               count(DISTINCT CASE WHEN access_type = 'WRITE' THEN principal END) AS writers,
+               sum(CASE WHEN access_type = 'WRITE' THEN access_events ELSE 0 END) AS writes,
+               max(unix_timestamp(last_access_time)) AS last_access
+        FROM $sp$.table_access_activity
+        WHERE {DAYS} AND table_full_name NOT LIKE '__databricks_internal.%' AND {DET_WS}
+        GROUP BY table_full_name ORDER BY reads DESC LIMIT 50""",
+    "det_recipients": """
+        SELECT recipient_name, shares_granted, share_names, token_expiration, recipient_owner,
+               unix_timestamp(created) AS created_epoch
+        FROM $sp$.delta_sharing_posture
+        WHERE authentication_type = 'TOKEN' AND NOT has_ip_allowlist
+        ORDER BY shares_granted DESC""",
+}
+
+# One panel per SRA use case: (sra name, title, base search, SPL post-process, fields, description)
+TIME_FMT = '| eval {f}=strftime(tonumber({f}), "%Y-%m-%d %H:%M")'
+SENSITIVE_FIELDS = ["time", "severity", "workspace_name", "actor", "target", "detail", "source_ip"]
+
+
+def sens(operations):
+    ops = " OR ".join(f'operation="{o}"' for o in operations)
+    return f"| where {ops} " + TIME_FMT.format(f="epoch") + " | rename epoch as time"
+
+
+def dets(rule_ids):
+    ids = " OR ".join(f'detection_id="{r}"' for r in rule_ids)
+    return f"| where {ids} " + TIME_FMT.format(f="epoch") + " | rename epoch as window_start"
+
+
+DET_FIELDS = ["window_start", "principal", "workspaces", "events", "distinct_objects", "objects", "sample", "source_ips"]
+ACT_FIELDS = ["principal", "events", "distinct_objects_seen", "sample_objects", "workspaces", "days", "last_seen"]
+
+
+def act(activity):
+    return f'| where activity="{activity}" ' + TIME_FMT.format(f="last_seen")
+
+
+USE_CASES = [
+    ("terms_of_service_changes", "Terms of Service changes", "det_sensitive", sens(["TERMS_OF_SERVICE"]), SENSITIVE_FIELDS,
+     "accounts.acceptTos / sendTos (account level)."),
+    ("account_settings_changes", "Account settings and account admin changes", "det_sensitive",
+     sens(["ACCOUNT_SETTING", "ACCOUNT_ADMIN"]), SENSITIVE_FIELDS,
+     "accounts.setSetting / deleteSetting at account level, setAccountAdmin, changeAccountOwner."),
+    ("global_init_script_changes", "Global init script changes", "det_sensitive", sens(["GLOBAL_INIT_SCRIPT"]), SENSITIVE_FIELDS,
+     "globalInitScripts.create / update / delete (name, enabled, script-SHA256)."),
+    ("mount_point_creation", "DBFS mount point creation", "det_sensitive", sens(["DBFS_MOUNT"]), SENSITIVE_FIELDS,
+     "dbfs.mount (mountPoint, source). Mounts bypass Unity Catalog."),
+    ("repeated_access_to_secrets", "Repeated access to secrets", "det_detections", dets(["SECRET_ACCESS_BURST"]), DET_FIELDS,
+     "10+ distinct secrets read by one principal in an hour (secrets.getSecret, scope/key)."),
+    ("access_to_secrets", "Access to secrets (selected period)", "det_activity", act("SECRET_READ"), ACT_FIELDS,
+     "Every principal reading secrets (secrets.getSecret): reads, secrets (scope/key) and workspaces."),
+    ("access_to_multiple_workspaces", "Access to multiple workspaces", "det_workspaces", "| head 500",
+     ["principal", "principal_type", "workspaces", "days", "events", "sample_workspaces"],
+     "Principals active in more than one workspace (workspace = request_params.workspace_id for Unity Catalog events)."),
+    ("use_of_print_statements", "Use of print statements", "det_activity", act("PRINT_STATEMENT"),
+     ["principal", "events", "sample_objects", "sample", "workspaces", "last_seen"],
+     "runCommand with print() in commandText: needs verbose audit logs on the workspace."),
+    ("ip_addresses_used_to_access_databricks", "IP addresses used to access Databricks", "det_ips",
+     "| stats sum(events) as requests sum(data_access_events) as data_access sum(failed_events) as failed max(principals) as principals "
+     "values(access_level) as access first(sample_principals) as sample_principals max(last_seen) as last_seen by source_ip "
+     "| sort - requests | eval last_seen=strftime(tonumber(last_seen), \"%Y-%m-%d\") | eval access=mvjoin(access, \", \")",
+     ["source_ip", "access", "requests", "data_access", "failed", "principals", "sample_principals", "last_seen"],
+     "Client IPs of all audit events (source_ip_address, port removed); events issued by Databricks compute carry no client IP."),
+    ("ip_address_ranges_used_to_access_databricks", "IP address ranges (/24) used to access Databricks", "det_ips",
+     "| stats sum(events) as requests dc(source_ip) as ips max(principals) as principals values(access_level) as access "
+     "max(last_seen) as last_seen by ip_range | sort - requests | eval last_seen=strftime(tonumber(last_seen), \"%Y-%m-%d\") "
+     "| eval access=mvjoin(access, \", \")",
+     ["ip_range", "access", "ips", "requests", "principals", "last_seen"], "IPv4 /24 (IPv6 /48) networks of the client IPs."),
+    ("repeated_unauthorized_uc_requests", "Repeated unauthorized Unity Catalog requests", "det_detections",
+     dets(["UC_DENIED_BURST"]), DET_FIELDS, "More than 25 Unity Catalog requests refused (status 401 / 403) in an hour."),
+    ("repeated_unauthorized_uc_data_requests", "Repeated unauthorized Unity Catalog data requests", "det_detections",
+     dets(["UC_DATA_DENIED_BURST"]), DET_FIELDS,
+     "More than 15 refused generateTemporaryTable/Volume/PathCredential or deltaSharingQueryTable requests in an hour."),
+    ("unauthorized_uc_data_requests", "Unauthorized Unity Catalog data requests (selected period)", "det_activity",
+     act("UC_DATA_DENIED"), ACT_FIELDS, "Every refused data access request (401 / 403) per principal."),
+    ("delta_sharing_recipients_without_ip_acls", "Delta Sharing recipients created without IP access list", "det_sensitive",
+     sens(["RECIPIENT_WITHOUT_IP_ACL"]), SENSITIVE_FIELDS,
+     "unityCatalog.createRecipient / updateRecipient with authentication_type TOKEN and no ip_access_list."),
+    ("delta_sharing_ip_access_list_failures", "Delta Sharing IP access list failures", "det_sensitive",
+     sens(["SHARING_IP_DENIED"]), SENSITIVE_FIELDS, "deltaSharingQueryTable / QueryTableChanges with is_ip_access_denied = true."),
+    ("delta_sharing_recipient_token_lifetime_change", "Delta Sharing recipient token lifetime change", "det_sensitive",
+     sens(["RECIPIENT_TOKEN_LIFETIME"]), SENSITIVE_FIELDS,
+     "unityCatalog.updateMetastore with delta_sharing_recipient_token_lifetime_in_seconds."),
+    ("most_popular_data_products", "Most popular data products", "det_popular",
+     '| eval last_access=strftime(tonumber(last_access), "%Y-%m-%d %H:%M")',
+     ["table_full_name", "readers", "reads", "writers", "writes", "last_access"],
+     "Reads and writes per table from lineage (system.access.table_lineage); refreshed tables only."),
+    ("databricks_access_to_customer_workspaces", "Databricks support access to workspaces", "det_sensitive",
+     sens(["DATABRICKS_SUPPORT_ACCESS"]), SENSITIVE_FIELDS, "databricksAccess: approver, reason and duration in the detail."),
+    ("install_library_on_all_clusters", "Libraries installed on all clusters", "det_sensitive",
+     sens(["LIBRARY_ON_ALL_CLUSTERS"]), SENSITIVE_FIELDS, "clusterLibraries.installLibraryOnAllClusters."),
+    ("other_behavioural_detections", "Other behavioural detections", "det_detections",
+     dets(["FAILED_LOGIN_BURST", "IP_ACCESS_DENIED_BURST", "PRIVILEGE_ESCALATION", "DOWNLOAD_BURST", "DESTRUCTIVE_BURST",
+           "READ_WRITE_BURST", "MULTI_WORKSPACE"]),
+     ["window_start", "title", "principal", "workspaces", "events", "distinct_objects", "objects", "sample"],
+     "repeated_failed_login_attempts, ip_access_list_failures, potential_privilege_escalation, data_downloads_from_control_plane, "
+     "destructive_activities, high_number_of_read_writes, access_to_multiple_workspaces (5+ per day)."),
+    ("host_security_alerts", "Host security alerts (compliance security profile)", "det_sensitive",
+     sens(["ANTIVIRUS_DETECTION", "HOST_INTRUSION_ALERT"]), SENSITIVE_FIELDS,
+     "clamAVScanService-dataplane and capsule8-alerts-dataplane events (compliance security profile only)."),
+]
 
 # ----------------------------------------------------------------------------- Simple XML helpers
 def opt(name, value):
@@ -272,13 +441,7 @@ def live_dashboard(cfg):
     <default>*</default>
   </input>
 </fieldset>"""
-    time_search = (f'<search id="window"><query><![CDATA[{TIME_SEARCH}]]></query>'
-                   "<earliest>$time.earliest$</earliest><latest>$time.latest$</latest>"
-                   "<done><set token=\"t_from\">$result.t_from$</set><set token=\"t_to\">$result.t_to$</set>"
-                   "<set token=\"t_span\">$result.t_span$</set><set token=\"t_span_label\">$result.t_span_label$</set></done>"
-                   "</search>")
-    actor_search = (f"<search><query><![CDATA[{ACTOR_SEARCH}]]></query>"
-                    '<done><set token="actor_like">$result.v$</set></done></search>')
+    time_search, actor_search_xml = window_search(), actor_search()
     counts = search(q["live_counts"], sid="counts", refresh=refresh)
     freshness = search(q["live_freshness"], sid="freshness", refresh=refresh)
     kpis = row(
@@ -302,7 +465,7 @@ def live_dashboard(cfg):
   <description>Near real-time security activity across Databricks workspaces, read from system.access.audit when the dashboard refreshes (every {refresh}; audit events arrive about 10 minutes after they happen). Click an actor to filter on it. Source: the live_* views of the Databricks Security Posture bundle.</description>
   {init_tokens(cfg)}
   {time_search}
-  {actor_search}
+  {actor_search_xml}
   {counts}
   {freshness}
   {fieldset}
@@ -323,6 +486,13 @@ def live_dashboard(cfg):
              drilldown=actor_drill, count=10,
              description="Admin rights granted, PAT without expiry, high privilege granted to all users, IP access list deleted, "
                          "ABAC policy deleted, open-sharing token retrieved. Ignores the signal filter."))}
+  {row(table("Behavioural detections (SRA rules)", q["live_detections"] + " " + time_fmt.format(f="epoch")
+             + " | rename epoch as window_start",
+             ["window_start", "severity", "title", "principal", "workspaces", "events", "distinct_objects", "objects", "sample",
+              "source_ips"],
+             formats=color_map("severity", SEVERITY_COLORS), drilldown=actor_drill, count=8,
+             description="Repeated failed logins, secret reads, refused requests, permission changes, deletions, downloads, "
+                         "read / writes and access to 5+ workspaces above the detection_rules thresholds."))}
   {row(table("Latest security events", q["live_events"] + " " + to_time + " | eval detail=substr(detail, 1, 160)",
              ["_time", "signal", "category", "workspace_name", "actor", "action_name", "target", "detail", "source_ip",
               "status_code"],
@@ -344,6 +514,95 @@ def live_dashboard(cfg):
              description="Context-based ingress and serverless egress denials (empty if these system tables are not enabled)."))}
 </form>"""
     return xml
+
+
+def window_search():
+    """Search converting the time picker into $t_from$ / $t_to$ (epoch seconds, at most 90 days) and a chart bucket."""
+    return (f'<search id="window"><query><![CDATA[{TIME_SEARCH}]]></query>'
+            "<earliest>$time.earliest$</earliest><latest>$time.latest$</latest>"
+            "<done><set token=\"t_from\">$result.t_from$</set><set token=\"t_to\">$result.t_to$</set>"
+            "<set token=\"t_span\">$result.t_span$</set><set token=\"t_span_label\">$result.t_span_label$</set></done>"
+            "</search>")
+
+
+def actor_search():
+    """Search turning the actor input into a safe SQL LIKE pattern ($actor_like$)."""
+    return (f"<search><query><![CDATA[{ACTOR_SEARCH}]]></query>"
+            '<done><set token="actor_like">$result.v$</set></done></search>')
+
+
+SOURCE_SEARCH = """| makeresults | eval v="$sp$." . if("$source$" == "live", "live_", "")"""
+
+
+def detections_dashboard(cfg):
+    q = {k: dbq(v) for k, v in DETECTION_QUERIES.items()}
+    actor_drill = ('<condition field="principal"><set token="form.actor">$click.value2$</set></condition>'
+                   '<condition field="actor"><set token="form.actor">$click.value2$</set></condition>'
+                   '<condition field="*"></condition>')
+    bases = "".join(search(q[k], sid=k) for k in ("det_sensitive", "det_detections", "det_activity", "det_ips", "det_workspaces"))
+    fieldset = f"""
+<fieldset submitButton="false" autoRun="true">
+  <input type="time" token="time" searchWhenChanged="true">
+    <label>Time range (max 90 days)</label>
+    <default><earliest>-7d@d</earliest><latest>now</latest></default>
+  </input>
+  <input type="dropdown" token="source" searchWhenChanged="true">
+    <label>Source</label>
+    <choice value="tables">Refreshed tables (fast, up to 90 days)</choice>
+    <choice value="live">Live audit log (minutes behind, slower)</choice>
+    <default>tables</default>
+  </input>
+  <input type="dropdown" token="ws" searchWhenChanged="true">
+    <label>Workspace</label>
+    <choice value="*">All workspaces</choice>
+    <default>*</default>
+    <fieldForLabel>workspace_name</fieldForLabel>
+    <fieldForValue>workspace_name</fieldForValue>
+    {search(dbq("SELECT DISTINCT workspace_name FROM $sp$.workspaces WHERE workspace_name IS NOT NULL ORDER BY 1"))}
+  </input>
+  <input type="text" token="actor" searchWhenChanged="true">
+    <label>Principal (* wildcard)</label>
+    <default>*</default>
+  </input>
+</fieldset>"""
+    source_search = (f"<search><query><![CDATA[{SOURCE_SEARCH}]]></query>"
+                     '<done><set token="src">$result.v$</set></done></search>')
+    kpis = row(
+        single("Behavioural detections", "det_detections", '| where detection_id!="PRINT_STATEMENTS" | stats count as v',
+               "SRA rules exceeded"),
+        single("HIGH / MEDIUM detections", "det_detections",
+               '| stats count(eval(severity="HIGH" OR severity="MEDIUM")) as v', "to review", [GOOD, MEDIUM], [0]),
+        single("Sensitive operations", "det_sensitive", "| stats count as v", "ToS, settings, init scripts, mounts ..."),
+        single("HIGH sensitive operations", "det_sensitive", '| stats count(eval(severity="HIGH")) as v', "act now",
+               [GOOD, HIGH], [0]),
+        single("Source IPs", "det_ips", "| stats dc(source_ip) as v", "client IPs seen"),
+        single("Principals in 2+ workspaces", "det_workspaces", "| stats count as v", "see access_to_multiple_workspaces"),
+    )
+    panels = []
+    for name, title, base, spl, fields, description in USE_CASES:
+        formats = color_map("severity", SEVERITY_COLORS) if "severity" in fields else ""
+        drill = actor_drill if ("principal" in fields or "actor" in fields) else ""
+        # an empty panel says so explicitly (validation of a use case = "no event in the period", not a blank box)
+        empty = f' | appendpipe [| stats count | where count=0 | eval {fields[0]}="No event in the selected period" | fields - count]'
+        panels.append(table(f"{name} — {title}", spl + empty, fields, formats=formats, drilldown=drill, count=6, base=base,
+                            description=description))
+    panels.append(table("Open-sharing recipients without IP access list (current)",
+                        q["det_recipients"] + ' | eval created=strftime(tonumber(created_epoch), "%Y-%m-%d") | fields - created_epoch',
+                        ["recipient_name", "shares_granted", "share_names", "token_expiration", "recipient_owner", "created"],
+                        count=6, description="Current state (system.information_schema): TOKEN recipients with no IP access list."))
+    rows = "".join(row(*panels[i:i + 2]) for i in range(0, len(panels), 2))
+    return f"""<form version="1.1" theme="dark" hideEdit="false">
+  <label>Databricks Security - Threat detections</label>
+  <description>One panel per Databricks Security Reference Architecture (SRA) use case, from Databricks system tables: sensitive operations, behavioural detections (thresholds in the detection_rules view of the bundle), secrets, workspaces, IP addresses and ranges, unauthorized Unity Catalog requests, Delta Sharing and data usage. Source: refreshed tables (every 6 hours, up to 90 days) or the live audit log. Click a principal to filter on it.</description>
+  {init_tokens(cfg)}
+  {window_search()}
+  {actor_search()}
+  {source_search}
+  {bases}
+  {fieldset}
+  {kpis}
+  {rows}
+</form>"""
 
 
 def posture_dashboard(cfg):
@@ -371,7 +630,7 @@ def posture_dashboard(cfg):
     kpi = search(q["posture_kpi"], sid="kpi", refresh="30m")
     xml = f"""<form version="1.1" theme="dark" hideEdit="false">
   <label>Databricks Security - Posture</label>
-  <description>Security posture of the Databricks estate: 32 checks modelled on the Security Analysis Tool, scored and refreshed by the Databricks Security Posture job (every 6 hours by default). Click a check title for the Databricks security best practice, a recommendation for the remediation documentation.</description>
+  <description>Security posture of the Databricks estate: 44 checks modelled on the Security Analysis Tool and the Security Reference Architecture, scored and refreshed by the Databricks Security Posture job (every 6 hours by default). Click a check title for the Databricks security best practice, a recommendation for the remediation documentation.</description>
   {init_tokens(cfg)}
   {kpi}
   {fieldset}
@@ -379,7 +638,7 @@ def posture_dashboard(cfg):
       single("Posture score", "kpi", "| fields score_pct", "weighted share of passing checks", [HIGH, INFO, GOOD], [50, 80], "%"),
       single("Change vs 7 days ago", "kpi", "| eval v=round(score_pct - score_pct_7d_ago, 1) | fields v", "score points",
              [HIGH, INFO, GOOD], [-0.05, 0.05]),
-      single("Checks failing", "kpi", "| eval v=checks_failed | fields v", "of 32 checks", [GOOD, MEDIUM], [0]),
+      single("Checks failing", "kpi", "| eval v=checks_failed | fields v", "checks with findings", [GOOD, MEDIUM], [0]),
       single("HIGH findings", "kpi", "| fields high_findings", "failing objects", [GOOD, HIGH], [0]),
       single("MEDIUM findings", "kpi", "| fields medium_findings", "failing objects", [GOOD, MEDIUM], [0]),
       single("Data age", "kpi", "| fields hours_since_refresh", "hours since the last refresh", [GOOD, LOW, HIGH], [8, 24], "h"))}
@@ -411,6 +670,7 @@ def posture_dashboard(cfg):
              ["metric_label", "last_7_days", "previous_7_days", "change"], count=30),
        html(f'<h3>Go further</h3><ul><li><a href="{BEST_PRACTICES_URL}" target="_blank">Databricks security best practices</a></li>'
             '<li><a href="databricks_security_live">Live activity dashboard</a></li>'
+            '<li><a href="databricks_security_detections">Threat detections dashboard</a></li>'
             "<li>Ask questions in natural language: the <b>Security Posture Analyst</b> Genie agent in Databricks.</li></ul>"))}
 </form>"""
     return xml
@@ -419,38 +679,35 @@ def posture_dashboard(cfg):
 # ----------------------------------------------------------------------------- alerts
 ALERT_WINDOW = ("event_date >= CAST(current_timestamp() - INTERVAL 1 DAY AS DATE) "
                 "AND event_time >= current_timestamp() - INTERVAL {minutes} MINUTES")
+# (name, description, SQL, suppression fields, suppression period). The thresholds of the behavioural detections are the
+# detection_rules view of the bundle: one alert covers every rule (one result per detection, field detection_id), so the
+# audit log is read once per run instead of once per rule. Route or split on detection_id / operation in Splunk.
 ALERTS = [
     ("Databricks - HIGH security signal",
      "Every HIGH signal of the live feed: admin rights granted, PAT without expiry, high privilege granted to all users, "
-     "IP access list deleted, ABAC policy deleted, open-sharing token retrieved. One alert per event.",
+     "IP access list deleted, ABAC policy deleted, open-sharing token retrieved or recipient without IP access list, account "
+     "admin change, host security alert. One alert per event.",
      f"""SELECT event_id, unix_timestamp(event_time) AS epoch, workspace_name, category, actor, action_name, target, detail, source_ip
          FROM $sp$.live_security_events WHERE {ALERT_WINDOW.format(minutes=45)} AND signal = 'HIGH'""",
-     "event_id"),
-    ("Databricks - Failed authentication burst",
-     "20 or more failed authentications for the same principal and source IP within the last hour (brute force, leaked or "
-     "expired credentials).",
-     f"""SELECT actor, source_ip, count(*) AS failures, array_join(slice(collect_set(detail), 1, 3), ' | ') AS errors,
-                max(unix_timestamp(event_time)) AS epoch
-         FROM $sp$.live_security_events WHERE {ALERT_WINDOW.format(minutes=60)}
-           AND category IN ('Authentication failure', 'IP access blocked')
-         GROUP BY actor, source_ip HAVING count(*) >= 20""",
-     "actor,source_ip"),
-    ("Databricks - Mass interactive data export",
-     "20 or more interactive downloads / exports by the same person within the last hour (possible exfiltration).",
-     f"""SELECT actor, count(*) AS exports, count(DISTINCT target) AS objects,
-                array_join(slice(collect_set(detail), 1, 5), ', ') AS channels, max(unix_timestamp(event_time)) AS epoch
-         FROM $sp$.live_security_events WHERE {ALERT_WINDOW.format(minutes=60)} AND category = 'Data export'
-         GROUP BY actor HAVING count(*) >= 20""",
-     "actor"),
-    ("Databricks - Denied data access burst",
-     "50 or more denied Unity Catalog / SQL requests by the same principal within the last hour (probing, privilege "
-     "escalation attempts or a broken pipeline).",
-     f"""SELECT principal, count(*) AS attempts, count(DISTINCT securable_name) AS securables,
-                array_join(slice(collect_set(securable_name), 1, 5), ', ') AS sample_securables,
-                max(unix_timestamp(event_time)) AS epoch
-         FROM $sp$.live_access_denied_events WHERE {ALERT_WINDOW.format(minutes=60)}
-         GROUP BY principal HAVING count(*) >= 50""",
-     "principal"),
+     "event_id", "2h"),
+    ("Databricks - Behavioural detection (SRA)",
+     "One alert per principal and window above a detection rule (detection_rules): repeated failed logins, IP access list "
+     "failures, repeated access to secrets, repeated unauthorized Unity Catalog / data requests, potential privilege "
+     "escalation, download / destructive / read-write bursts, access to 5+ workspaces. Field detection_id names the rule.",
+     """SELECT concat(detection_id, '|', principal, '|', CAST(unix_timestamp(window_start) AS STRING)) AS alert_key, detection_id,
+                title, severity, principal, workspaces, events, distinct_objects, array_join(slice(objects, 1, 10), ', ') AS objects,
+                sample, array_join(source_ips, ', ') AS source_ips, sra_query, unix_timestamp(window_start) AS epoch
+         FROM $sp$.live_security_detections
+         WHERE event_date >= current_date() - 1 AND window_end >= current_timestamp() - INTERVAL 75 MINUTES
+           AND detection_id <> 'PRINT_STATEMENTS'""",
+     "alert_key", "24h"),
+    ("Databricks - Sensitive operation",
+     "One alert per sensitive operation: Terms of Service, account settings and admins, Databricks support access, global "
+     "init scripts, DBFS mounts, libraries on all clusters, open-sharing recipients without IP access list, recipient token "
+     "lifetime, IP-denied sharing queries, host security alerts. Field operation names the type.",
+     f"""SELECT event_id, operation, severity, workspace_name, actor, target, detail, source_ip, unix_timestamp(event_time) AS epoch
+         FROM $sp$.live_sensitive_operations WHERE {ALERT_WINDOW.format(minutes=45)}""",
+     "event_id", "2h"),
 ]
 
 
@@ -460,15 +717,15 @@ def savedsearches(cfg):
            "# Disabled by default: enable them in Settings > Searches, reports, and alerts, and add an action (email, ...).",
            "# Every 15 minutes over the last 45-60 minutes (audit events arrive ~10 minutes late); suppression on the listed",
            "# fields avoids alerting twice on the same event / principal.", ""]
-    for name, description, query, suppress in ALERTS:
+    for name, description, query, suppress, period in ALERTS:
         spl = (f'| databricksquery account_name="{cfg["account"]}"{warehouse} command_timeout=300 '
                f'query="{sql(query.replace("$sp$", cfg["schema"]))}" | eval _time=tonumber(epoch) | fields - epoch')
         out += [f"[{name}]", f"description = {description}", f"search = {spl}", "disabled = 1",
                 "cron_schedule = */15 * * * *", "enableSched = 1", "dispatch.earliest_time = -1h", "dispatch.latest_time = now",
                 "counttype = number of events", "relation = greater than", "quantity = 0",
-                "alert.track = 1", "alert.severity = 4" if "HIGH" in name else "alert.severity = 3",
+                "alert.track = 1", "alert.severity = 4" if "HIGH" in name or "Sensitive" in name else "alert.severity = 3",
                 "alert.digest_mode = 0", "alert.suppress = 1", f"alert.suppress.fields = {suppress}",
-                "alert.suppress.period = 2h", "action.email.useNSSubject = 1", ""]
+                f"alert.suppress.period = {period}", "action.email.useNSSubject = 1", ""]
     return "\n".join(out)
 
 
@@ -481,7 +738,7 @@ is_configured = 1
 
 [launcher]
 author = Databricks field engineering
-description = Databricks security posture and near real-time security activity, from Databricks system tables through the Databricks Add-on for Splunk (TA-Databricks).
+description = Databricks security posture, threat detections (SRA use cases) and near real-time security activity, from Databricks system tables through the Databricks Add-on for Splunk (TA-Databricks).
 version = {VERSION}
 
 [ui]
@@ -494,12 +751,14 @@ check_for_updates = 0
 """,
         "default/data/ui/nav/default.xml": """<nav search_view="search" color="#d03b3b">
   <view name="databricks_security_live" default="true" />
+  <view name="databricks_security_detections" />
   <view name="databricks_security_posture" />
   <view name="search" />
   <a href="alerts">Alerts</a>
 </nav>
 """,
         "default/data/ui/views/databricks_security_live.xml": live_dashboard(cfg),
+        "default/data/ui/views/databricks_security_detections.xml": detections_dashboard(cfg),
         "default/data/ui/views/databricks_security_posture.xml": posture_dashboard(cfg),
         "default/savedsearches.conf": savedsearches(cfg),
         "metadata/default.meta": """# Dashboards and alerts are readable by every role; only admins can edit them.
@@ -565,7 +824,7 @@ def main():
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write(pretty(content) if rel.endswith(".xml") else content)
-    print(f"wrote {app_dir}: 2 dashboards, {len(ALERTS)} alerts (account {args.account}, schema {args.schema})")
+    print(f"wrote {app_dir}: 3 dashboards, {len(ALERTS)} alerts (account {args.account}, schema {args.schema})")
     if args.package:
         package = os.path.join(out, f"{APP}-{VERSION}.tar.gz")
         with tarfile.open(package, "w:gz") as tar:

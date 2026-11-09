@@ -18,11 +18,12 @@
 | Layer | Objects | Defined in | Refreshed |
 |---|---|---|---|
 | Sources | `src_*` views over system tables | `src/sql/10_sources.sql` | never queried by consumers |
-| Activity tables | `audit_security_events`, `auth_events_daily`, `access_denied_daily`, `secret_access_daily`, `data_export_daily`, `delta_sharing_activity_daily`, `network_events_daily`, `table_access_activity` | `src_<name>` views | incrementally on `event_date`, liquid-clustered |
+| Activity tables | `audit_security_events`, `auth_events_daily`, `access_denied_daily`, `secret_access_daily`, `data_export_daily`, `delta_sharing_activity_daily`, `network_events_daily`, `table_access_activity`, `security_activity_hourly` (hourly activity per principal for detections), `access_footprint_daily` (principal × workspace × access level × client IP) | `src_<name>` views | incrementally on `event_date`, liquid-clustered; rebuilt when their source view changes |
 | State tables | `workspaces`, `uc_grants`, `securable_owners`, `governed_tags`, `tag_assignments`, `abac_policies`, `fine_grained_controls`, `sensitive_columns`, `table_governance_coverage`, `delta_sharing_posture`, `compute_posture` | `src_<name>` views | rebuilt every run |
-| Semantic views | `failed_auth_events`, `identity_changes`, `token_events`, `ip_access_list_changes`, `uc_permission_changes`, `workspace_acl_changes`, `tag_changes`, `policy_changes`, `data_export_events`, `workspace_config_changes`, `workspace_config_latest` | `src/sql/20_semantic.sql` | views over `audit_security_events` |
+| Semantic views | `failed_auth_events`, `identity_changes`, `token_events`, `ip_access_list_changes`, `uc_permission_changes`, `workspace_acl_changes`, `tag_changes`, `policy_changes`, `data_export_events`, `workspace_config_changes`, `workspace_config_latest`, `sensitive_operations` | `src/sql/20_semantic.sql` | views over `audit_security_events` |
+| Detections | `detection_rules` (SRA thresholds), `security_detections` (one row per principal and window above a rule) | `src/sql/25_detections.sql` | views over `security_activity_hourly` / `access_footprint_daily` |
 | Posture | `security_checks`, `security_findings`, `security_findings_latest`, `check_results`, `posture_score`, `posture_snapshots`, `posture_trend`, `activity_kpis_daily`, `weekly_activity_kpis` | `src/sql/30_findings.sql` | findings materialised every run, one snapshot per day |
-| Live views | `live_<semantic view>` (same definitions over `src_audit_security_events`), `live_security_events`, `live_access_denied_events`, `live_network_denials` | `src/sql/20_semantic.sql` (second variant), `src/sql/40_live.sql` | never: they read `system.access.audit` at query time (about 10 minutes behind), for the [Splunk app](splunk.md) |
+| Live views | `live_<semantic view>`, `live_security_detections` (same definitions over the `src_*` views), `live_security_events`, `live_access_denied_events`, `live_network_denials`, `live_security_activity_hourly`, `live_access_footprint_daily` | `src/sql/20_semantic.sql`, `25_detections.sql` (second variant), `src/sql/40_live.sql` | never: they read `system.access.audit` at query time (about 10 minutes behind), for the [Splunk app](splunk.md) |
 
 Every table and view has a description. The Genie agent relies on these descriptions, so keep them accurate when you
 change a definition.
@@ -46,7 +47,16 @@ change a definition.
 
 It logs one line per step with its duration and result.
 
-**Live views.** `20_semantic.sql` is rendered twice (`SEMANTIC_VARIANTS` in `refresh.py`): over the materialised
+**Workspace of an event.** Unity Catalog and account console events are logged at account level with
+`workspace_id = 0`; the workspace the request came from is in `request_params.workspace_id`. Every source view uses
+`coalesce(request_params.workspace_id, workspace_id)`, so grants, denials, tag and policy changes are attributed to
+their workspace.
+
+**Rebuilds.** Each activity table stores a hash of its source view definition (`security_posture.definition_hash`
+table property). When an upgrade changes the definition (not only the columns), the next run rebuilds the table from
+the back-fill window, so history is re-derived with the new logic.
+
+**Live views.** `20_semantic.sql` and `25_detections.sql` are rendered twice (`SEMANTIC_VARIANTS` in `refresh.py`): over the materialised
 `audit_security_events` for the dashboard, Genie and the checks, and as `live_*` views over `src_audit_security_events`,
 which read the audit log when queried. `live_security_events` (`40_live.sql`) is one feed of all security events with
 a `category` and a `signal` (HIGH / MEDIUM / INFO), computed in a single scan of the audit log (a union of the topic

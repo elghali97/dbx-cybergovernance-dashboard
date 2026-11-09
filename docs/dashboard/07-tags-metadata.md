@@ -1,4 +1,4 @@
-# 6. Tags & metadata
+# 7. Tags & metadata
 
 > Governed tags, tag coverage and documentation gaps: the metadata that ABAC policies, discovery and audits rely on.
 

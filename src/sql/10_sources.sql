@@ -21,16 +21,22 @@ SELECT '0', 'Account console', CAST(NULL AS STRING), 'RUNNING', CAST(NULL AS TIM
 
 -- ----------------------------------------------------------------------------- activity (incremental)
 
+-- Workspace of an audit event: Unity Catalog (and other account-level) events are logged with workspace_id = 0 and the
+-- workspace the request came from in request_params.workspace_id, so every view uses
+-- coalesce(nullif(request_params.workspace_id, ''), workspace_id).
+
 CREATE OR REPLACE VIEW ${catalog}.${schema}.src_audit_security_events
-COMMENT 'Security-relevant audit events, one row per event (from system.access.audit): identity and admin changes, token lifecycle, IP access list and workspace / account setting changes, failed authentication, Unity Catalog grants, tag assignments and ABAC policies, workspace object ACLs, cluster / serverless policies, global init scripts, Delta Sharing object changes and interactive data exports. High-volume successful activity (logins, reads, secret reads) is aggregated in the *_daily tables instead.'
+COMMENT 'Security-relevant audit events, one row per event (from system.access.audit): identity and admin changes, token lifecycle, IP access list and workspace / account setting changes, failed authentication, Unity Catalog grants, tag assignments and ABAC policies, workspace object ACLs, cluster / serverless policies, global init scripts, Delta Sharing object changes and IP-denied queries, interactive data exports, and sensitive operations (Terms of Service, Databricks support access, DBFS mounts, libraries installed on all clusters, metastore Delta Sharing settings, compliance security profile host alerts). workspace_id is the workspace the request came from (request_params.workspace_id for account-level Unity Catalog events); audit_level is ACCOUNT_LEVEL or WORKSPACE_LEVEL. High-volume successful activity (logins, reads, secret reads) is aggregated in the *_daily tables instead.'
 AS
 SELECT
-  event_time, event_date, workspace_id, service_name, action_name,
+  event_time, event_date, coalesce(nullif(request_params.workspace_id, ''), workspace_id) AS workspace_id, audit_level,
+  service_name, action_name,
   user_identity.email AS actor,
   identity_metadata.run_by AS run_by,
   source_ip_address, user_agent, request_params,
   response.status_code AS status_code,
   left(response.error_message, 1000) AS error_message,
+  left(response.result, 500) AS response_result,
   event_id
 FROM system.access.audit
 WHERE
@@ -42,7 +48,7 @@ WHERE
       'changeDatabricksSqlAcl', 'accountUserResetPassword',
       'generateDbToken', 'revokeDbToken', 'garbageCollectDbToken', 'updateDbToken', 'changeDbTokenAcl',
       'createIpAccessList', 'updateIpAccessList', 'deleteIpAccessList', 'replaceIpAccessList',
-      'setSetting', 'deleteSetting'))
+      'setSetting', 'deleteSetting', 'acceptTos', 'sendTos', 'setAccountAdmin', 'changeAccountOwner'))
   OR (service_name = 'workspace' AND action_name IN (
       'updatePermissionAssignment', 'deletePermissionAssignment', 'workspaceConfEdit', 'setSetting', 'deleteSetting'))
   OR service_name IN ('identityManagement', 'accountsAccessControl')
@@ -60,6 +66,15 @@ WHERE
       'rotateRecipientToken', 'retrieveRecipientToken', 'updateSharePermissions'))
   OR (service_name = 'tagging' AND action_name IN ('createTagPolicy', 'updateTagPolicy', 'deleteTagPolicy'))
   OR (service_name IN ('clusterPolicies', 'serverlessPolicy', 'globalInitScripts') AND action_name IN ('create', 'edit', 'update', 'delete'))
+  -- sensitive operations: Databricks support access, DBFS mounts, libraries on all clusters, Delta Sharing metastore
+  -- settings and IP-denied shared-data queries, compliance security profile host alerts (antivirus, intrusion detection)
+  OR action_name IN ('databricksAccess', 'mount', 'installLibraryOnAllClusters')
+  OR (service_name = 'unityCatalog' AND action_name = 'updateMetastore'
+      AND (request_params.delta_sharing_recipient_token_lifetime_in_seconds IS NOT NULL OR request_params.delta_sharing_scope IS NOT NULL))
+  OR (service_name = 'unityCatalog' AND action_name IN ('deltaSharingQueryTable', 'deltaSharingQueryTableChanges')
+      AND request_params.is_ip_access_denied = 'true')
+  OR (service_name = 'clamAVScanService-dataplane' AND (response.result LIKE '%FOUND%' OR response.result RLIKE 'Infected files: [1-9]'))
+  OR service_name = 'capsule8-alerts-dataplane'
   -- workspace object ACLs and secret scopes
   OR action_name IN ('changeWorkspaceAcl', 'changeClusterAcl', 'changeJobAcl', 'changeClusterPolicyAcl', 'changeEndpointAcls',
                      'changePermissions', 'changeInstancePoolAcl', 'changeInferenceEndpointAcl', 'changeAppsAcl',
@@ -82,7 +97,7 @@ AS
 WITH auth AS (
   SELECT
     a.event_date,
-    a.workspace_id,
+    coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id) AS workspace_id,
     coalesce(a.request_params.user, a.user_identity.email) AS principal,
     CASE
       WHEN a.action_name IN ('IpAccessDenied', 'accountIpAclsValidationFailed') THEN 'IP_ACCESS_DENIED'
@@ -128,7 +143,7 @@ COMMENT 'Daily denied data-access attempts in Unity Catalog and Databricks SQL (
 AS
 SELECT
   a.event_date,
-  a.workspace_id,
+  coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id) AS workspace_id,
   w.workspace_name,
   coalesce(a.user_identity.email, a.identity_metadata.run_by) AS principal,
   a.service_name,
@@ -139,28 +154,29 @@ SELECT
   count(*) AS attempts,
   max(a.event_time) AS last_attempt
 FROM system.access.audit a
-LEFT JOIN ${catalog}.${schema}.src_workspaces w ON w.workspace_id = a.workspace_id
+LEFT JOIN ${catalog}.${schema}.src_workspaces w ON w.workspace_id = coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id)
 WHERE a.service_name IN ('unityCatalog', 'databrickssql', 'sqlPermissions')
   AND (a.response.status_code IN (401, 403) OR a.response.error_message LIKE '%PERMISSION_DENIED%')
 GROUP BY ALL
 ;
 
 CREATE OR REPLACE VIEW ${catalog}.${schema}.src_secret_access_daily
-COMMENT 'Daily secrets activity per principal, action and secret scope (getSecret reads, writes, scope and ACL changes) from system.access.audit. failures = denied / failed calls (missing-secret lookups excluded).'
+COMMENT 'Daily secrets activity per principal, action, secret scope and key (getSecret reads, writes, scope and ACL changes) from system.access.audit. failures = denied / failed calls (missing-secret lookups excluded).'
 AS
 SELECT
   a.event_date,
-  a.workspace_id,
+  coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id) AS workspace_id,
   w.workspace_name,
   coalesce(a.user_identity.email, a.identity_metadata.run_by) AS principal,
   CASE WHEN coalesce(a.user_identity.email, a.identity_metadata.run_by) RLIKE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-' THEN 'SERVICE_PRINCIPAL'
        WHEN coalesce(a.user_identity.email, a.identity_metadata.run_by) LIKE '%@%' THEN 'USER' ELSE 'OTHER' END AS principal_type,
   a.action_name,
   a.request_params.scope AS secret_scope,
+  a.request_params.key AS secret_key,
   count(*) AS events,
   count_if(coalesce(a.response.status_code, 200) >= 400 AND a.response.status_code <> 3002) AS failures
 FROM system.access.audit a
-LEFT JOIN ${catalog}.${schema}.src_workspaces w ON w.workspace_id = a.workspace_id
+LEFT JOIN ${catalog}.${schema}.src_workspaces w ON w.workspace_id = coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id)
 WHERE a.service_name = 'secrets'
 GROUP BY ALL
 ;
@@ -171,7 +187,7 @@ AS
 WITH e AS (
   SELECT
     a.event_date,
-    a.workspace_id,
+    coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id) AS workspace_id,
     coalesce(a.user_identity.email, a.identity_metadata.run_by) AS principal,
     CASE
       WHEN a.service_name = 'databrickssql' THEN 'SQL_RESULT_DOWNLOAD'
@@ -209,7 +225,7 @@ COMMENT 'Daily Delta Sharing activity. activity_type DATA_ACCESS = recipients li
 AS
 SELECT
   a.event_date,
-  a.workspace_id,
+  coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id) AS workspace_id,
   w.workspace_name,
   CASE WHEN a.action_name LIKE 'deltaSharing%' THEN 'DATA_ACCESS' ELSE 'CHANGE' END AS activity_type,
   a.action_name,
@@ -223,7 +239,7 @@ SELECT
   count_if(a.response.status_code >= 400) AS failures,
   count_if(a.request_params.is_ip_access_denied = 'true') AS ip_denied_events
 FROM system.access.audit a
-LEFT JOIN ${catalog}.${schema}.src_workspaces w ON w.workspace_id = a.workspace_id
+LEFT JOIN ${catalog}.${schema}.src_workspaces w ON w.workspace_id = coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id)
 WHERE a.service_name = 'unityCatalog'
   AND (a.action_name LIKE 'deltaSharing%'
        OR a.action_name IN ('createShare', 'updateShare', 'deleteShare', 'createRecipient', 'updateRecipient', 'deleteRecipient',
@@ -266,6 +282,118 @@ LATERAL VIEW inline(array(
   named_struct('table_full_name', l.source_table_full_name, 'access_type', 'READ'),
   named_struct('table_full_name', l.target_table_full_name, 'access_type', 'WRITE'))) t
 WHERE t.table_full_name IS NOT NULL
+GROUP BY ALL
+;
+
+CREATE OR REPLACE VIEW ${catalog}.${schema}.src_security_activity_hourly
+COMMENT 'Hourly activity per principal and workspace for behavioural detections (SRA queries and alerts), from system.access.audit. activity: FAILED_LOGIN (401 / 403 logins), IP_ACCESS_DENIED (IP access list blocks), SECRET_READ (getSecret; objects = scope/key), UC_DENIED (Unity Catalog request refused with 401 / 403), UC_DATA_DENIED (temporary credential or Delta Sharing query refused: data access denied), UC_DATA_READ / UC_DATA_WRITE (temporary table / volume / path credentials issued: data read or written), PERMISSION_CHANGE (grants, ACL, group, admin, ownership and token changes), DESTRUCTIVE (delete / trash operations), DOWNLOAD (result downloads and exports), PRINT_STATEMENT (notebook / job commands calling print(), needs verbose audit logs). events = requests in the hour, distinct_objects = distinct securables / keys / actions, objects = up to 20 of them, sample = an example (error or command), source_ips = up to 10 client IPs.'
+AS
+WITH a AS (
+  SELECT
+    a.event_time, a.event_date,
+    coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id) AS workspace_id,
+    coalesce(a.user_identity.email, a.request_params.user, a.identity_metadata.run_by) AS principal,
+    CASE
+      WHEN a.action_name IN ('aadBrowserLogin', 'aadTokenLogin', 'certLogin', 'jwtLogin', 'login', 'oidcBrowserLogin', 'samlLogin',
+                             'tokenLogin', 'mfaLogin', 'oidcTokenAuthorization', 'mintOAuthToken')
+           AND a.response.status_code IN (401, 403) THEN 'FAILED_LOGIN'
+      WHEN a.action_name IN ('IpAccessDenied', 'accountIpAclsValidationFailed') THEN 'IP_ACCESS_DENIED'
+      WHEN a.service_name = 'secrets' AND a.action_name = 'getSecret' THEN 'SECRET_READ'
+      WHEN a.action_name IN ('generateTemporaryTableCredential', 'generateTemporaryPathCredential', 'generateTemporaryVolumeCredential',
+                             'deltaSharingQueryTable', 'deltaSharingQueryTableChanges')
+           AND a.response.status_code IN (401, 403) THEN 'UC_DATA_DENIED'
+      WHEN a.service_name = 'unityCatalog' AND a.response.status_code IN (401, 403) THEN 'UC_DENIED'
+      WHEN a.action_name IN ('generateTemporaryTableCredential', 'generateTemporaryPathCredential', 'generateTemporaryVolumeCredential')
+           AND coalesce(a.response.status_code, 200) < 400
+        THEN CASE WHEN a.request_params.operation RLIKE 'WRITE|CREATE' THEN 'UC_DATA_WRITE' ELSE 'UC_DATA_READ' END
+      WHEN a.action_name IN ('addPrincipalToGroup', 'addPrincipalsToGroup', 'changeDatabricksSqlAcl', 'changeDatabricksWorkspaceAcl',
+                             'changeDbTokenAcl', 'changePasswordAcl', 'changeServicePrincipalAcls', 'generateDbToken', 'setAdmin',
+                             'changeClusterAcl', 'changeClusterPolicyAcl', 'changeWarehouseAcls', 'changePermissions',
+                             'transferObjectOwnership', 'changePipelineAcls', 'changeFeatureTableAcl', 'changeIamRoleAcl',
+                             'changeInstancePoolAcl', 'changeJobAcl', 'resetJobAcl', 'changeRegisteredModelAcl',
+                             'changeInferenceEndpointAcl', 'putAcl', 'changeSecurableOwner', 'grantPermission', 'changeWorkspaceAcl',
+                             'updateRoleAssignment', 'setAccountAdmin', 'changeAccountOwner', 'updatePermissions',
+                             'updateSharePermissions')
+           AND coalesce(a.response.status_code, 200) < 400 THEN 'PERMISSION_CHANGE'
+      WHEN (lower(a.action_name) LIKE '%delete%' OR lower(a.action_name) LIKE '%trash%')
+           AND coalesce(a.response.status_code, 200) < 400 THEN 'DESTRUCTIVE'
+      WHEN coalesce(a.response.status_code, 200) < 400 AND (
+           a.action_name IN ('downloadPreviewResults', 'downloadLargeResults', 'getModelVersionDownloadUri', 'getModelVersionSignedDownloadUri',
+                             'downloadLargeQueryResult', 'genieDownloadVisualization', 'genieGenerateDownloadFullQueryResult',
+                             'exportDashboard', 'downloadDashboardData')
+        OR (a.action_name = 'workspaceExport' AND coalesce(a.request_params.workspaceExportFormat, '') <> 'SOURCE')
+        OR (a.action_name = 'downloadQueryResult' AND coalesce(a.request_params.fileType, '') <> 'arrows')) THEN 'DOWNLOAD'
+      WHEN a.action_name = 'runCommand' AND a.request_params.commandText RLIKE '(^|[^.\\w])print\\s*\\(' THEN 'PRINT_STATEMENT'
+    END AS activity,
+    coalesce(
+      CASE WHEN a.action_name = 'getSecret' THEN concat_ws('/', a.request_params.scope, a.request_params.key) END,
+      a.request_params.table_full_name, a.request_params.volume_full_name, a.request_params.securable_full_name,
+      a.request_params.full_name_arg, a.request_params.url, a.request_params.table_url, a.request_params.share,
+      a.request_params.notebookId, a.request_params.notebookFullPath, a.request_params.path, a.request_params.name,
+      a.request_params.targetGroupName, a.request_params.targetUserName, a.action_name) AS object,
+    coalesce(left(a.response.error_message, 300), left(a.request_params.commandText, 300)) AS sample,
+    nullif(regexp_replace(a.source_ip_address, ':[0-9]+$', ''), '') AS source_ip
+  FROM system.access.audit a
+)
+SELECT
+  date_trunc('HOUR', a.event_time) AS event_hour, a.event_date, a.workspace_id, w.workspace_name, a.principal,
+  CASE
+    WHEN a.principal RLIKE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN 'SERVICE_PRINCIPAL'
+    WHEN a.principal LIKE '%@%' THEN 'USER'
+    ELSE 'OTHER'
+  END AS principal_type,
+  a.activity,
+  count(*) AS events,
+  count(DISTINCT a.object) AS distinct_objects,
+  slice(array_sort(collect_set(a.object)), 1, 20) AS objects,
+  max(a.sample) AS sample,
+  slice(array_sort(collect_set(a.source_ip)), 1, 10) AS source_ips
+FROM a
+LEFT JOIN ${catalog}.${schema}.src_workspaces w ON w.workspace_id = a.workspace_id
+WHERE a.activity IS NOT NULL AND coalesce(a.principal, '') NOT IN ('', 'System-User', 'unknown')
+GROUP BY ALL
+;
+
+CREATE OR REPLACE VIEW ${catalog}.${schema}.src_access_footprint_daily
+COMMENT 'Daily access footprint per principal, workspace, access level and client IP, from every event of system.access.audit: which IP addresses and ranges are used to access Databricks, by whom, and which principals access many workspaces. access_level is ACCOUNT (account console / account APIs), UNITY_CATALOG (Unity Catalog requests) or WORKSPACE. source_ip is the client IP without port (NULL when the event has no client IP: requests issued by Databricks compute or services on behalf of the principal, e.g. most Unity Catalog credential requests and SQL statements). ip_range is the /24 (IPv4) or /48 (IPv6) network. data_access_events counts Unity Catalog data access (temporary credentials issued, Delta Sharing queries).'
+AS
+WITH a AS (
+  SELECT
+    a.event_date,
+    coalesce(nullif(a.request_params.workspace_id, ''), a.workspace_id) AS workspace_id,
+    coalesce(a.user_identity.email, a.request_params.user, a.identity_metadata.run_by) AS principal,
+    CASE
+      WHEN a.audit_level = 'ACCOUNT_LEVEL' AND a.service_name = 'unityCatalog' THEN 'UNITY_CATALOG'
+      WHEN a.audit_level = 'ACCOUNT_LEVEL' THEN 'ACCOUNT'
+      ELSE 'WORKSPACE'
+    END AS access_level,
+    nullif(regexp_replace(a.source_ip_address, ':[0-9]+$', ''), '') AS raw_ip,
+    a.action_name IN ('generateTemporaryTableCredential', 'generateTemporaryPathCredential', 'generateTemporaryVolumeCredential',
+                      'deltaSharingQueryTable', 'deltaSharingQueryTableChanges') AS is_data_access,
+    a.response.status_code >= 400 AS is_failure
+  FROM system.access.audit a
+),
+b AS (
+  SELECT a.*, CASE WHEN raw_ip IN ('0.0.0.0', '127.0.0.1', '::1') THEN NULL ELSE raw_ip END AS source_ip FROM a
+)
+SELECT
+  b.event_date, b.workspace_id, w.workspace_name, b.principal,
+  CASE
+    WHEN b.principal RLIKE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN 'SERVICE_PRINCIPAL'
+    WHEN b.principal LIKE '%@%' THEN 'USER'
+    ELSE 'OTHER'
+  END AS principal_type,
+  b.access_level, b.source_ip,
+  CASE
+    WHEN b.source_ip RLIKE '^[0-9]{1,3}(\\.[0-9]{1,3}){3}$' THEN concat(substring_index(b.source_ip, '.', 3), '.0/24')
+    WHEN b.source_ip LIKE '%:%' THEN concat(substring_index(b.source_ip, ':', 3), '::/48')
+  END AS ip_range,
+  count(*) AS events,
+  count_if(b.is_data_access) AS data_access_events,
+  count_if(b.is_failure) AS failed_events
+FROM b
+LEFT JOIN ${catalog}.${schema}.src_workspaces w ON w.workspace_id = b.workspace_id
+WHERE coalesce(b.principal, '') NOT IN ('', 'System-User', 'unknown')
 GROUP BY ALL
 ;
 

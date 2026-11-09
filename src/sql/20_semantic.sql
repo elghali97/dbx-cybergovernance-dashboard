@@ -269,10 +269,10 @@ WHERE coalesce(e.status_code, 200) < 400
 ;
 
 CREATE OR REPLACE VIEW ${catalog}.${schema}.${live}workspace_config_changes
-COMMENT '${live_note}Workspace and account security setting changes (workspaceConfEdit and settings API), one row per setting changed. is_security_relevant flags settings that matter for security (IP access lists, PAT tokens and lifetime, downloads / exports, DBFS browser, web terminal, verbose audit logs, user isolation ...). is_risky_value flags a change towards a less secure value.'
+COMMENT '${live_note}Workspace and account security setting changes (workspaceConfEdit and settings API), one row per setting changed. scope is ACCOUNT (account console settings) or WORKSPACE. is_security_relevant flags settings that matter for security (IP access lists, PAT tokens and lifetime, downloads / exports, DBFS browser, web terminal, verbose audit logs, user isolation ...). is_risky_value flags a change towards a less secure value.'
 AS
 WITH conf AS (
-  SELECT e.event_time, e.event_date, e.workspace_id, e.actor, 'workspaceConf' AS source,
+  SELECT e.event_time, e.event_date, e.workspace_id, e.actor, 'workspaceConf' AS source, 'WORKSPACE' AS scope,
          k.col AS setting_name, element_at(split(e.request_params.workspaceConfValues, ','), k.pos + 1) AS setting_value,
          e.status_code, e.source_ip_address AS source_ip
   FROM ${catalog}.${schema}.${events} e
@@ -280,6 +280,7 @@ WITH conf AS (
   WHERE e.service_name = 'workspace' AND e.action_name = 'workspaceConfEdit'
   UNION ALL
   SELECT e.event_time, e.event_date, e.workspace_id, e.actor, 'settingsApi',
+         CASE WHEN e.audit_level = 'ACCOUNT_LEVEL' OR e.service_name = 'accounts' THEN 'ACCOUNT' ELSE 'WORKSPACE' END,
          coalesce(nullif(e.request_params.settingTypeName, ''), e.request_params.settingName),
          CASE WHEN e.action_name = 'deleteSetting' THEN '<deleted>' ELSE regexp_replace(e.request_params.settingValueForAudit, '"', '') END,
          e.status_code, e.source_ip_address
@@ -287,7 +288,7 @@ WITH conf AS (
   WHERE e.service_name IN ('workspace', 'accounts') AND e.action_name IN ('setSetting', 'deleteSetting')
     AND coalesce(e.request_params.settingTypeName, '') NOT RLIKE 'AclsInitializedForOrg$|^backfill'
 )
-SELECT c.event_time, c.event_date, c.workspace_id, w.workspace_name, c.actor, c.source, c.setting_name, c.setting_value, c.status_code, c.source_ip,
+SELECT c.event_time, c.event_date, c.workspace_id, w.workspace_name, c.actor, c.source, c.scope, c.setting_name, c.setting_value, c.status_code, c.source_ip,
   c.setting_name IN ('enableIpAccessLists', 'enableTokensConfig', 'maxTokenLifetimeDays', 'enableExportNotebook',
                      'enableNotebookTableClipboard', 'enableResultsDownloading', 'enableDbfsFileBrowser', 'enableWebTerminal',
                      'enableVerboseAuditLogs', 'enforceUserIsolation', 'enableDeprecatedGlobalInitScripts', 'enableUploadDataUis',
@@ -322,4 +323,68 @@ SELECT workspace_id, workspace_name, setting_name, setting_value, event_time AS 
 FROM ${catalog}.${schema}.${live}workspace_config_changes
 WHERE coalesce(status_code, 200) < 400
 QUALIFY row_number() OVER (PARTITION BY workspace_id, setting_name ORDER BY event_time DESC) = 1
+;
+
+CREATE OR REPLACE VIEW ${catalog}.${schema}.${live}sensitive_operations
+COMMENT '${live_note}Sensitive operations to review, one row per event: TERMS_OF_SERVICE (account admin accepted / was sent new Terms of Service), ACCOUNT_SETTING (account console setting changed), ACCOUNT_ADMIN (account admin granted or account owner changed), DATABRICKS_SUPPORT_ACCESS (Databricks staff logged in to a workspace through the support process; detail = approver, reason, duration), GLOBAL_INIT_SCRIPT (global init script created / updated / deleted; runs on every cluster), DBFS_MOUNT (mount point created: bypasses Unity Catalog governance), LIBRARY_ON_ALL_CLUSTERS (library installed on every cluster), RECIPIENT_WITHOUT_IP_ACL (open-sharing recipient created / updated without IP access list), RECIPIENT_TOKEN_LIFETIME (metastore Delta Sharing recipient token lifetime changed), SHARING_IP_DENIED (shared data query refused by a recipient IP access list), ANTIVIRUS_DETECTION and HOST_INTRUSION_ALERT (compliance security profile monitoring agents on compute hosts). severity HIGH / MEDIUM / LOW orders the review; target is the object, detail the evidence.'
+AS
+WITH o AS (
+  SELECT e.*,
+    CASE
+      WHEN e.action_name IN ('acceptTos', 'sendTos') THEN 'TERMS_OF_SERVICE'
+      WHEN e.action_name IN ('setAccountAdmin', 'changeAccountOwner') THEN 'ACCOUNT_ADMIN'
+      WHEN e.action_name IN ('setSetting', 'deleteSetting') AND e.audit_level = 'ACCOUNT_LEVEL'
+           AND coalesce(e.request_params.settingTypeName, '') NOT RLIKE 'AclsInitializedForOrg$|^backfill' THEN 'ACCOUNT_SETTING'
+      WHEN e.action_name = 'databricksAccess' THEN 'DATABRICKS_SUPPORT_ACCESS'
+      WHEN e.service_name = 'globalInitScripts' THEN 'GLOBAL_INIT_SCRIPT'
+      WHEN e.action_name = 'mount' THEN 'DBFS_MOUNT'
+      WHEN e.action_name = 'installLibraryOnAllClusters' THEN 'LIBRARY_ON_ALL_CLUSTERS'
+      WHEN e.action_name IN ('createRecipient', 'updateRecipient') AND upper(coalesce(e.request_params.authentication_type, '')) = 'TOKEN'
+           AND coalesce(e.request_params.ip_access_list, '') IN ('', '[]', '{}') THEN 'RECIPIENT_WITHOUT_IP_ACL'
+      WHEN e.action_name = 'updateMetastore' AND e.request_params.delta_sharing_recipient_token_lifetime_in_seconds IS NOT NULL
+        THEN 'RECIPIENT_TOKEN_LIFETIME'
+      WHEN e.action_name IN ('deltaSharingQueryTable', 'deltaSharingQueryTableChanges') AND e.request_params.is_ip_access_denied = 'true'
+        THEN 'SHARING_IP_DENIED'
+      WHEN e.service_name = 'clamAVScanService-dataplane' THEN 'ANTIVIRUS_DETECTION'
+      WHEN e.service_name = 'capsule8-alerts-dataplane' THEN 'HOST_INTRUSION_ALERT'
+    END AS operation
+  FROM ${catalog}.${schema}.${events} e
+)
+SELECT
+  o.event_time, o.event_date, o.workspace_id, w.workspace_name, o.operation,
+  CASE
+    WHEN o.operation IN ('ANTIVIRUS_DETECTION', 'HOST_INTRUSION_ALERT', 'ACCOUNT_ADMIN', 'RECIPIENT_WITHOUT_IP_ACL') THEN 'HIGH'
+    WHEN o.operation IN ('TERMS_OF_SERVICE', 'SHARING_IP_DENIED') THEN 'LOW'
+    ELSE 'MEDIUM'
+  END AS severity,
+  coalesce(o.actor, o.run_by, o.request_params.user) AS actor,
+  o.service_name, o.action_name,
+  coalesce(
+    o.request_params.name, o.request_params.mountPoint, o.request_params.settingTypeName, o.request_params.settingName,
+    o.request_params.script_id, o.request_params.share, o.request_params.recipient_name, o.request_params.instanceId,
+    o.request_params.targetUserName, o.request_params.user, o.request_params.id) AS target,
+  left(CASE o.operation
+    WHEN 'TERMS_OF_SERVICE' THEN concat_ws(' ', o.action_name, 'account', o.request_params.account_id,
+                                           CASE WHEN o.request_params.workspace_id IS NOT NULL THEN concat('workspace ', o.request_params.workspace_id) END)
+    WHEN 'ACCOUNT_SETTING' THEN concat(coalesce(o.request_params.settingTypeName, o.request_params.settingName), ' = ',
+                                       coalesce(o.request_params.settingValueForAudit, '<deleted>'))
+    WHEN 'DATABRICKS_SUPPORT_ACCESS' THEN concat_ws(' · ', concat('user ', o.request_params.user), concat('approver ', o.request_params.approver),
+                                                    concat('reason ', o.request_params.reason), concat('duration ', o.request_params.duration))
+    WHEN 'GLOBAL_INIT_SCRIPT' THEN concat_ws(' · ', o.action_name, concat('enabled ', o.request_params.enabled),
+                                             concat('sha256 ', o.request_params.`script-SHA256`))
+    WHEN 'DBFS_MOUNT' THEN concat_ws(' · ', concat('mount ', o.request_params.mountPoint), concat('source ', o.request_params.source))
+    WHEN 'LIBRARY_ON_ALL_CLUSTERS' THEN o.request_params.library
+    WHEN 'RECIPIENT_WITHOUT_IP_ACL' THEN concat('TOKEN recipient ', coalesce(o.request_params.name, o.request_params.name_arg), ' without IP access list')
+    WHEN 'RECIPIENT_TOKEN_LIFETIME' THEN concat('recipient token lifetime ', o.request_params.delta_sharing_recipient_token_lifetime_in_seconds, ' s (',
+      round(try_cast(o.request_params.delta_sharing_recipient_token_lifetime_in_seconds AS BIGINT) / 86400), ' days; 0 = never expires)')
+    WHEN 'SHARING_IP_DENIED' THEN concat_ws(' · ', concat('recipient ', o.request_params.recipient_name), concat('share ', o.request_params.share))
+    ELSE concat_ws(' · ', o.action_name, o.response_result, o.error_message)
+  END, 500) AS detail,
+  o.source_ip_address AS source_ip,
+  o.status_code,
+  o.event_id
+FROM o
+LEFT JOIN ${catalog}.${schema}.workspaces w ON w.workspace_id = o.workspace_id
+WHERE o.operation IS NOT NULL
+  AND (coalesce(o.status_code, 200) < 400 OR o.operation IN ('SHARING_IP_DENIED', 'ANTIVIRUS_DETECTION', 'HOST_INTRUSION_ALERT'))
 ;

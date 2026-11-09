@@ -13,19 +13,26 @@ OUT = os.path.join(os.path.dirname(__file__), "..", "src", "genie", "security_po
 FQ = "${catalog}.${schema}"
 
 TABLES = [  # Genie agents take at most 30 tables / views
-    "security_findings_latest", "check_results", "posture_score", "posture_trend", "activity_kpis_daily", "weekly_activity_kpis",
+    "security_findings_latest", "check_results", "posture_score", "posture_trend", "weekly_activity_kpis",
+    "security_detections", "sensitive_operations", "access_footprint_daily",
     "auth_events_daily", "failed_auth_events", "identity_changes", "token_events",
     "uc_grants", "securable_owners", "uc_permission_changes", "workspace_acl_changes", "access_denied_daily",
     "abac_policies", "sensitive_columns", "table_governance_coverage", "tag_assignments", "tag_changes", "policy_changes",
-    "data_export_events", "secret_access_daily", "table_access_activity", "delta_sharing_posture", "delta_sharing_activity_daily",
-    "network_events_daily", "workspace_config_latest", "workspace_config_changes", "compute_posture",
+    "data_export_events", "secret_access_daily", "table_access_activity", "delta_sharing_posture",
+    "workspace_config_latest", "workspace_config_changes", "compute_posture",
 ]
 
 INSTRUCTIONS = """You are the Databricks security posture analyst for the Cybersecurity team. All data comes from Databricks system tables (audit logs, Unity Catalog information_schema, lineage, compute and network tables) and is refreshed several times a day by the Security Posture job. The same data powers the "Databricks Security Posture" dashboard.
 
 Periods:
 - "This week" = the current ISO week starting Monday (date_trunc('WEEK', current_date())). "Last week" = the previous complete Monday-Sunday week. If no period is given for activity questions, use the last 7 days and say so.
-- weekly_activity_kpis gives one value per ISO week and metric (all workspaces); activity_kpis_daily gives the same metrics per day and workspace.
+- weekly_activity_kpis gives one value per ISO week and metric (all workspaces).
+
+Threat detections (Databricks Security Reference Architecture queries and alerts):
+- security_detections has one row per principal and window (hour or day) above a behavioural rule: repeated failed logins, IP access list failures, repeated access to secrets, repeated unauthorized Unity Catalog / data requests, potential privilege escalation, download / destructive / read-write bursts, print statements, access to multiple workspaces. title and description explain the rule, events / distinct_objects the measure, objects and sample the evidence.
+- sensitive_operations lists Terms of Service changes, account settings, account admins, Databricks support access, global init scripts, DBFS mounts, libraries installed on all clusters, open-sharing recipients without IP access list, recipient token lifetime changes, IP-denied sharing queries and host security alerts.
+- access_footprint_daily gives, per day, principal, workspace, access level (ACCOUNT / UNITY_CATALOG / WORKSPACE) and client IP, the number of requests: use it for "which IP addresses / ranges access Databricks" (ip_range is the /24) and "who accesses several workspaces". source_ip is NULL for requests issued by Databricks compute on behalf of the principal: exclude NULL IPs and say so.
+- In audit-based tables, workspace_id is the workspace the request came from (Unity Catalog events are logged at account level with the workspace in request parameters); workspace_id 0 means the account console.
 
 Posture:
 - Current findings are in security_findings_latest (one row per failing check and object; mention refreshed_at). check_results gives every check with status PASS / FAIL, findings and the check metadata. posture_score gives the score per category and overall (category = 'ALL'); score is between 0 and 1, score_pct between 0 and 100. posture_trend gives the daily history.
@@ -103,6 +110,23 @@ EXAMPLES = [
      f"SELECT 'Risky setting', event_time, workspace_name, actor, concat(setting_name, ' = ', setting_value)\n"
      f"FROM {FQ}.workspace_config_changes, w WHERE is_risky_value AND event_date >= w.d AND event_date < w.d + 7\n"
      f"ORDER BY event_time DESC"),
+    ("Which behavioural detections fired in the last 7 days?",
+     f"SELECT title, severity, principal, workspaces, count(*) AS windows, max(events) AS max_events,\n"
+     f"       max(distinct_objects) AS max_distinct_objects, max(window_end) AS last_seen, max(sra_query) AS sra_query\n"
+     f"FROM {FQ}.security_detections\n"
+     f"WHERE event_date >= current_date() - 7 AND detection_id <> 'PRINT_STATEMENTS'\n"
+     f"GROUP BY title, severity, principal, workspaces\nORDER BY severity, windows DESC"),
+    ("Which IP address ranges were used to access Databricks in the last 90 days?",
+     f"SELECT ip_range, count(DISTINCT source_ip) AS ips, count(DISTINCT principal) AS principals,\n"
+     f"       array_join(array_sort(collect_set(access_level)), ', ') AS access_levels, sum(events) AS requests, max(event_date) AS last_seen\n"
+     f"FROM {FQ}.access_footprint_daily\n"
+     f"WHERE event_date > current_date() - 90 AND ip_range IS NOT NULL\n"
+     f"GROUP BY ip_range\nORDER BY requests DESC"),
+    ("List sensitive operations of the last 30 days (Terms of Service, support access, mounts, init scripts ...)",
+     f"SELECT event_time, operation, severity, workspace_name, actor, target, detail\n"
+     f"FROM {FQ}.sensitive_operations\n"
+     f"WHERE event_date >= current_date() - 30\n"
+     f"ORDER BY event_time DESC"),
     ("Which human users still authenticate with personal access tokens?",
      f"SELECT principal, workspace_name, sum(events) AS pat_requests, max(event_date) AS last_seen\n"
      f"FROM {FQ}.auth_events_daily\n"
@@ -117,6 +141,8 @@ SAMPLE_QUESTIONS = [
     "Which sensitive columns are not protected by a mask or an ABAC policy?",
     "Who exported or downloaded the most data this week?",
     "Who has access to <catalog.schema.table>?",
+    "Which behavioural detections fired in the last 7 days?",
+    "Which IP address ranges were used to access Databricks in the last 90 days?",
 ]
 
 

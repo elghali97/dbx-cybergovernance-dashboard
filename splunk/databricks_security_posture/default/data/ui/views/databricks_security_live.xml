@@ -235,6 +235,37 @@
   </row>
   <row>
     <panel>
+      <title>Behavioural detections (SRA rules)</title>
+      <description>Repeated failed logins, secret reads, refused requests, permission changes, deletions, downloads, read / writes and access to 5+ workspaces above the detection_rules thresholds.</description>
+      <table>
+        <search>
+          <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT unix_timestamp(window_start) AS epoch, severity, title, principal, concat(array_join(slice(workspace_names, 1, 3), ', '), CASE WHEN size(workspace_names) > 3 THEN concat(' +', CAST(size(workspace_names) - 3 AS STRING), ' more') ELSE '' END) AS workspaces, events, distinct_objects, concat(array_join(slice(objects, 1, 3), ', '), CASE WHEN size(objects) > 3 THEN concat(' +', CAST(size(objects) - 3 AS STRING), ' more') ELSE '' END) AS objects, left(sample, 160) AS sample, concat(array_join(slice(source_ips, 1, 3), ', '), CASE WHEN size(source_ips) > 3 THEN concat(' +', CAST(size(source_ips) - 3 AS STRING), ' more') ELSE '' END) AS source_ips FROM $sp$.live_security_detections WHERE event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND window_end > timestamp_seconds($t_from$) AND window_start < timestamp_seconds($t_to$) AND detection_id <> 'PRINT_STATEMENTS' AND ('$ws$' = '*' OR array_contains(workspace_names, '$ws$')) AND lower(principal) LIKE lower('$actor_like$') ORDER BY severity_order, window_start DESC LIMIT 200" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as window_start]]></query>
+        </search>
+        <option name="count">8</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>window_start, severity, title, principal, workspaces, events, distinct_objects, objects, sample, source_ips</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="source_ip">
+            <set token="form.actor">*</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
       <title>Latest security events</title>
       <description>Most recent 500 events matching the filters. Click an actor to investigate it.</description>
       <table>

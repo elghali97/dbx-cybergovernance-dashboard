@@ -115,7 +115,7 @@
       "name": "cn_config_changes",
       "displayName": "Workspace security setting changes",
       "queryLines": [
-        "SELECT event_time, event_date, workspace_name, actor, setting_name, setting_value,\n",
+        "SELECT event_time, event_date, workspace_name, actor, scope, setting_name, setting_value,\n",
         "       CASE WHEN is_risky_value THEN '⚠️ Risky' ELSE '✅ OK' END AS setting_status\n",
         "FROM workspace_config_changes WHERE is_security_relevant AND coalesce(status_code, 200) < 400\n",
         "ORDER BY event_time DESC"
@@ -174,7 +174,7 @@
       "name": "ex_secrets",
       "displayName": "Secret access per day",
       "queryLines": [
-        "SELECT event_date, workspace_name, principal, principal_type, action_name, secret_scope, events, failures FROM secret_access_daily ORDER BY events DESC"
+        "SELECT event_date, workspace_name, principal, principal_type, action_name, secret_scope, secret_key, events, failures FROM secret_access_daily ORDER BY events DESC"
       ]
     },
     {
@@ -408,6 +408,114 @@
         "       (SELECT count_if(control_type = 'ROW_FILTER') FROM fine_grained_controls) AS row_filters,\n",
         "       (SELECT count(*) FROM sensitive_columns) AS sensitive_columns,\n",
         "       (SELECT count(*) FROM security_findings_latest WHERE check_id = 'DP-01') AS unprotected_sensitive"
+      ]
+    },
+    {
+      "name": "td_daily",
+      "displayName": "Detections per day",
+      "queryLines": [
+        "SELECT event_date,\n",
+        "  sum(CASE WHEN detection_id IN ('FAILED_LOGIN_BURST', 'IP_ACCESS_DENIED_BURST') THEN 1 ELSE 0 END) AS login_bursts,\n",
+        "  sum(CASE WHEN detection_id = 'SECRET_ACCESS_BURST' THEN 1 ELSE 0 END) AS secret_bursts,\n",
+        "  sum(CASE WHEN detection_id IN ('UC_DENIED_BURST', 'UC_DATA_DENIED_BURST') THEN 1 ELSE 0 END) AS denied_bursts,\n",
+        "  sum(CASE WHEN detection_id = 'PRIVILEGE_ESCALATION' THEN 1 ELSE 0 END) AS escalations,\n",
+        "  sum(CASE WHEN detection_id IN ('DESTRUCTIVE_BURST', 'DOWNLOAD_BURST', 'READ_WRITE_BURST') THEN 1 ELSE 0 END) AS data_bursts,\n",
+        "  sum(CASE WHEN detection_id = 'MULTI_WORKSPACE' THEN 1 ELSE 0 END) AS multi_workspace\n",
+        "FROM security_detections\n",
+        "GROUP BY event_date"
+      ]
+    },
+    {
+      "name": "td_detections",
+      "displayName": "Behavioural detections",
+      "queryLines": [
+        "SELECT detection_id, title, severity, severity_order, event_date, window_start, principal, principal_type, events,\n",
+        "       distinct_objects, array_join(objects, ', ') AS objects, sample, array_join(source_ips, ', ') AS source_ips, workspaces,\n",
+        "       concat(CASE measure WHEN 'distinct_objects' THEN 'distinct objects' ELSE 'events' END, ' >= ', CAST(threshold AS STRING)) AS rule,\n",
+        "       sra_query, description\n",
+        "FROM security_detections\n",
+        "ORDER BY severity_order, window_start DESC"
+      ]
+    },
+    {
+      "name": "td_ips",
+      "displayName": "IP addresses used (90 days)",
+      "queryLines": [
+        "SELECT source_ip, ip_range, array_join(array_sort(collect_set(access_level)), ', ') AS access_levels,\n",
+        "       count(DISTINCT principal) AS principals, count(DISTINCT workspace_id) AS workspaces, sum(events) AS events,\n",
+        "       sum(data_access_events) AS data_access_events, sum(failed_events) AS failed_events,\n",
+        "       min(event_date) AS first_seen, max(event_date) AS last_seen,\n",
+        "       array_join(slice(array_sort(collect_set(principal)), 1, 5), ', ') AS sample_principals\n",
+        "FROM access_footprint_daily\n",
+        "WHERE source_ip IS NOT NULL AND event_date > current_date() - 90\n",
+        "GROUP BY source_ip, ip_range\n",
+        "ORDER BY events DESC\n",
+        "LIMIT 1000"
+      ]
+    },
+    {
+      "name": "td_popular",
+      "displayName": "Most popular data assets (90 days)",
+      "queryLines": [
+        "SELECT table_full_name, catalog_name,\n",
+        "       count(DISTINCT CASE WHEN access_type = 'READ' THEN principal END) AS readers,\n",
+        "       sum(CASE WHEN access_type = 'READ' THEN access_events ELSE 0 END) AS reads,\n",
+        "       count(DISTINCT CASE WHEN access_type = 'WRITE' THEN principal END) AS writers,\n",
+        "       sum(CASE WHEN access_type = 'WRITE' THEN access_events ELSE 0 END) AS writes,\n",
+        "       max(last_access_time) AS last_access\n",
+        "FROM table_access_activity\n",
+        "WHERE event_date > current_date() - 90 AND table_full_name NOT LIKE '__databricks_internal.%'\n",
+        "GROUP BY table_full_name, catalog_name\n",
+        "ORDER BY reads DESC\n",
+        "LIMIT 200"
+      ]
+    },
+    {
+      "name": "td_prints",
+      "displayName": "Print statements (verbose audit logs)",
+      "queryLines": [
+        "SELECT event_hour, event_date, workspace_name, principal, events, array_join(objects, ', ') AS notebooks_or_jobs, sample\n",
+        "FROM security_activity_hourly\n",
+        "WHERE activity = 'PRINT_STATEMENT'\n",
+        "ORDER BY event_hour DESC"
+      ]
+    },
+    {
+      "name": "td_ranges",
+      "displayName": "IP ranges used (90 days)",
+      "queryLines": [
+        "SELECT ip_range, array_join(array_sort(collect_set(access_level)), ', ') AS access_levels, count(DISTINCT source_ip) AS ips,\n",
+        "       count(DISTINCT principal) AS principals, count(DISTINCT workspace_id) AS workspaces, sum(events) AS events,\n",
+        "       sum(data_access_events) AS data_access_events, max(event_date) AS last_seen\n",
+        "FROM access_footprint_daily\n",
+        "WHERE ip_range IS NOT NULL AND event_date > current_date() - 90\n",
+        "GROUP BY ip_range\n",
+        "ORDER BY events DESC\n",
+        "LIMIT 500"
+      ]
+    },
+    {
+      "name": "td_sensitive",
+      "displayName": "Sensitive operations",
+      "queryLines": [
+        "SELECT event_time, event_date, workspace_name, operation, severity, actor, action_name, target, detail, source_ip\n",
+        "FROM sensitive_operations\n",
+        "ORDER BY event_time DESC"
+      ]
+    },
+    {
+      "name": "td_workspaces",
+      "displayName": "Workspaces per principal (90 days)",
+      "queryLines": [
+        "SELECT principal, principal_type, count(DISTINCT workspace_id) AS workspaces, count(DISTINCT event_date) AS active_days,\n",
+        "       sum(events) AS events, array_join(slice(array_sort(collect_set(workspace_name)), 1, 10), ', ') AS sample_workspaces,\n",
+        "       max(event_date) AS last_seen\n",
+        "FROM access_footprint_daily\n",
+        "WHERE workspace_id <> '0' AND event_date > current_date() - 90\n",
+        "GROUP BY principal, principal_type\n",
+        "HAVING count(DISTINCT workspace_id) > 1\n",
+        "ORDER BY workspaces DESC, events DESC\n",
+        "LIMIT 500"
       ]
     },
     {
@@ -2113,6 +2221,1861 @@
       ]
     },
     {
+      "name": "detections",
+      "displayName": "Threat detections",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "text_024",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## 🚨 Threat detections\n",
+                "\n",
+                "Behavioural detections and sensitive operations modelled on the Databricks Security Reference Architecture (SRA) queries and alerts: bursts of failed logins, secret reads, refused requests, permission changes, deletions and downloads, access to many workspaces, plus the IP addresses and data used. Thresholds: `detection_rules`.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_025",
+            "queries": [
+              {
+                "name": "filter_025_td_daily",
+                "query": {
+                  "datasetName": "td_daily",
+                  "fields": [
+                    {
+                      "name": "event_date",
+                      "expression": "`event_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "filter_025_td_detections",
+                "query": {
+                  "datasetName": "td_detections",
+                  "fields": [
+                    {
+                      "name": "event_date",
+                      "expression": "`event_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "filter_025_td_sensitive",
+                "query": {
+                  "datasetName": "td_sensitive",
+                  "fields": [
+                    {
+                      "name": "event_date",
+                      "expression": "`event_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "filter_025_td_prints",
+                "query": {
+                  "datasetName": "td_prints",
+                  "fields": [
+                    {
+                      "name": "event_date",
+                      "expression": "`event_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "frame": {
+                "showTitle": true,
+                "title": "Date"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "event_date",
+                    "displayName": "Date",
+                    "queryName": "filter_025_td_daily"
+                  },
+                  {
+                    "fieldName": "event_date",
+                    "displayName": "Date",
+                    "queryName": "filter_025_td_detections"
+                  },
+                  {
+                    "fieldName": "event_date",
+                    "displayName": "Date",
+                    "queryName": "filter_025_td_sensitive"
+                  },
+                  {
+                    "fieldName": "event_date",
+                    "displayName": "Date",
+                    "queryName": "filter_025_td_prints"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_026",
+            "queries": [
+              {
+                "name": "filter_026_td_detections",
+                "query": {
+                  "datasetName": "td_detections",
+                  "fields": [
+                    {
+                      "name": "title",
+                      "expression": "`title`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Detection"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "title",
+                    "displayName": "Detection",
+                    "queryName": "filter_026_td_detections"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_027",
+            "queries": [
+              {
+                "name": "filter_027_td_sensitive",
+                "query": {
+                  "datasetName": "td_sensitive",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "filter_027_td_prints",
+                "query": {
+                  "datasetName": "td_prints",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Workspace"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace",
+                    "queryName": "filter_027_td_sensitive"
+                  },
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace",
+                    "queryName": "filter_027_td_prints"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 10,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_028",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_daily",
+                  "fields": [
+                    {
+                      "name": "sum(login_bursts)",
+                      "expression": "SUM(`login_bursts`)"
+                    },
+                    {
+                      "name": "daily(event_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `event_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Failed-login bursts",
+                "description": "Failed logins / IP blocks above threshold in an hour",
+                "showDescription": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(login_bursts)",
+                  "displayName": "Failed-login bursts",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  },
+                  "style": {
+                    "rules": [
+                      {
+                        "condition": {
+                          "operator": ">",
+                          "operand": {
+                            "type": "data-value",
+                            "value": "0"
+                          }
+                        },
+                        "color": "#ec835a"
+                      },
+                      {
+                        "condition": {
+                          "operator": "==",
+                          "operand": {
+                            "type": "data-value",
+                            "value": "0"
+                          }
+                        },
+                        "color": "#0ca30c"
+                      }
+                    ]
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(event_date)"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_029",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_daily",
+                  "fields": [
+                    {
+                      "name": "sum(secret_bursts)",
+                      "expression": "SUM(`secret_bursts`)"
+                    },
+                    {
+                      "name": "daily(event_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `event_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Secret-read bursts",
+                "description": "10+ distinct secrets read in an hour",
+                "showDescription": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(secret_bursts)",
+                  "displayName": "Secret-read bursts",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  },
+                  "style": {
+                    "rules": [
+                      {
+                        "condition": {
+                          "operator": ">",
+                          "operand": {
+                            "type": "data-value",
+                            "value": "0"
+                          }
+                        },
+                        "color": "#ec835a"
+                      },
+                      {
+                        "condition": {
+                          "operator": "==",
+                          "operand": {
+                            "type": "data-value",
+                            "value": "0"
+                          }
+                        },
+                        "color": "#0ca30c"
+                      }
+                    ]
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(event_date)"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_030",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_daily",
+                  "fields": [
+                    {
+                      "name": "sum(denied_bursts)",
+                      "expression": "SUM(`denied_bursts`)"
+                    },
+                    {
+                      "name": "daily(event_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `event_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Unauthorized bursts",
+                "description": "Unity Catalog / data requests refused",
+                "showDescription": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(denied_bursts)",
+                  "displayName": "Unauthorized bursts",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  },
+                  "style": {
+                    "rules": [
+                      {
+                        "condition": {
+                          "operator": ">",
+                          "operand": {
+                            "type": "data-value",
+                            "value": "0"
+                          }
+                        },
+                        "color": "#ec835a"
+                      },
+                      {
+                        "condition": {
+                          "operator": "==",
+                          "operand": {
+                            "type": "data-value",
+                            "value": "0"
+                          }
+                        },
+                        "color": "#0ca30c"
+                      }
+                    ]
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(event_date)"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_031",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_daily",
+                  "fields": [
+                    {
+                      "name": "sum(escalations)",
+                      "expression": "SUM(`escalations`)"
+                    },
+                    {
+                      "name": "daily(event_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `event_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Privilege escalation",
+                "description": "25+ permission changes in an hour",
+                "showDescription": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(escalations)",
+                  "displayName": "Privilege escalation",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  },
+                  "style": {
+                    "rules": [
+                      {
+                        "condition": {
+                          "operator": ">",
+                          "operand": {
+                            "type": "data-value",
+                            "value": "0"
+                          }
+                        },
+                        "color": "#ec835a"
+                      },
+                      {
+                        "condition": {
+                          "operator": "==",
+                          "operand": {
+                            "type": "data-value",
+                            "value": "0"
+                          }
+                        },
+                        "color": "#0ca30c"
+                      }
+                    ]
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(event_date)"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_032",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_daily",
+                  "fields": [
+                    {
+                      "name": "sum(data_bursts)",
+                      "expression": "SUM(`data_bursts`)"
+                    },
+                    {
+                      "name": "daily(event_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `event_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Data bursts",
+                "description": "Mass deletes, downloads or read / writes",
+                "showDescription": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(data_bursts)",
+                  "displayName": "Data bursts",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(event_date)"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_033",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_daily",
+                  "fields": [
+                    {
+                      "name": "sum(multi_workspace)",
+                      "expression": "SUM(`multi_workspace`)"
+                    },
+                    {
+                      "name": "daily(event_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `event_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Many workspaces",
+                "description": "Principal active in 5+ workspaces in a day",
+                "showDescription": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(multi_workspace)",
+                  "displayName": "Many workspaces",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(event_date)"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 10,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_034",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_detections",
+                  "fields": [
+                    {
+                      "name": "title",
+                      "expression": "`title`"
+                    },
+                    {
+                      "name": "count(principal)",
+                      "expression": "COUNT(`principal`)"
+                    },
+                    {
+                      "name": "severity",
+                      "expression": "`severity`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Detections by rule"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "title",
+                  "displayName": "Rule",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "count(principal)",
+                  "displayName": "Detections",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "severity",
+                  "displayName": "Severity",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "HIGH",
+                        "color": "#d03b3b"
+                      },
+                      {
+                        "value": "MEDIUM",
+                        "color": "#ec835a"
+                      },
+                      {
+                        "value": "LOW",
+                        "color": "#fab219"
+                      }
+                    ],
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "HIGH",
+                        "MEDIUM",
+                        "LOW"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "line_035",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_detections",
+                  "fields": [
+                    {
+                      "name": "daily(event_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `event_date`)"
+                    },
+                    {
+                      "name": "count(principal)",
+                      "expression": "COUNT(`principal`)"
+                    },
+                    {
+                      "name": "title",
+                      "expression": "`title`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "Detections per day"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "daily(event_date)",
+                  "displayName": "Date",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "count(principal)",
+                  "displayName": "Detections",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "title",
+                  "displayName": "Rule",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 5,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "table_036",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_detections",
+                  "fields": [
+                    {
+                      "name": "window_start",
+                      "expression": "`window_start`"
+                    },
+                    {
+                      "name": "severity",
+                      "expression": "`severity`"
+                    },
+                    {
+                      "name": "title",
+                      "expression": "`title`"
+                    },
+                    {
+                      "name": "principal",
+                      "expression": "`principal`"
+                    },
+                    {
+                      "name": "workspaces",
+                      "expression": "`workspaces`"
+                    },
+                    {
+                      "name": "events",
+                      "expression": "`events`"
+                    },
+                    {
+                      "name": "distinct_objects",
+                      "expression": "`distinct_objects`"
+                    },
+                    {
+                      "name": "rule",
+                      "expression": "`rule`"
+                    },
+                    {
+                      "name": "objects",
+                      "expression": "`objects`"
+                    },
+                    {
+                      "name": "sample",
+                      "expression": "`sample`"
+                    },
+                    {
+                      "name": "source_ips",
+                      "expression": "`source_ips`"
+                    },
+                    {
+                      "name": "description",
+                      "expression": "`description`"
+                    },
+                    {
+                      "name": "sra_query",
+                      "expression": "`sra_query`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Behavioural detections",
+                "description": "One row per principal and window above a rule threshold",
+                "showDescription": true
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "window_start",
+                    "displayName": "Window start"
+                  },
+                  {
+                    "fieldName": "severity",
+                    "displayName": "Severity",
+                    "style": {
+                      "type": "basic",
+                      "rules": [
+                        {
+                          "condition": {
+                            "operator": "==",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "HIGH"
+                            }
+                          },
+                          "backgroundColor": "#d03b3b",
+                          "foregroundColor": "#FFFFFF"
+                        },
+                        {
+                          "condition": {
+                            "operator": "==",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "MEDIUM"
+                            }
+                          },
+                          "backgroundColor": "#ec835a",
+                          "foregroundColor": "#0B0B0B"
+                        },
+                        {
+                          "condition": {
+                            "operator": "==",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "LOW"
+                            }
+                          },
+                          "backgroundColor": "#fab219",
+                          "foregroundColor": "#0B0B0B"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "title",
+                    "displayName": "Detection",
+                    "tooltip": {
+                      "templatedText": "{{description}} (SRA: {{sra_query}})"
+                    }
+                  },
+                  {
+                    "fieldName": "principal",
+                    "displayName": "Principal"
+                  },
+                  {
+                    "fieldName": "workspaces",
+                    "displayName": "Workspaces"
+                  },
+                  {
+                    "fieldName": "events",
+                    "displayName": "Events"
+                  },
+                  {
+                    "fieldName": "distinct_objects",
+                    "displayName": "Distinct objects"
+                  },
+                  {
+                    "fieldName": "rule",
+                    "displayName": "Rule"
+                  },
+                  {
+                    "fieldName": "objects",
+                    "displayName": "Objects (sample)"
+                  },
+                  {
+                    "fieldName": "sample",
+                    "displayName": "Evidence"
+                  },
+                  {
+                    "fieldName": "source_ips",
+                    "displayName": "Source IPs"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 12,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "text_037",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Sensitive operations\n",
+                "\n",
+                "Terms of Service, account settings and admins, Databricks support access, global init scripts, DBFS mounts, libraries on all clusters, open-sharing recipients without IP access list, recipient token lifetime, IP-denied sharing queries, host security alerts.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_038",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_sensitive",
+                  "fields": [
+                    {
+                      "name": "operation",
+                      "expression": "`operation`"
+                    },
+                    {
+                      "name": "count(event_time)",
+                      "expression": "COUNT(`event_time`)"
+                    },
+                    {
+                      "name": "severity",
+                      "expression": "`severity`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Sensitive operations by type"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "operation",
+                  "displayName": "Operation",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "count(event_time)",
+                  "displayName": "Events",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "severity",
+                  "displayName": "Severity",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "HIGH",
+                        "color": "#d03b3b"
+                      },
+                      {
+                        "value": "MEDIUM",
+                        "color": "#ec835a"
+                      },
+                      {
+                        "value": "LOW",
+                        "color": "#fab219"
+                      }
+                    ],
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "HIGH",
+                        "MEDIUM",
+                        "LOW"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 20,
+            "width": 4,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "table_039",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_sensitive",
+                  "fields": [
+                    {
+                      "name": "event_time",
+                      "expression": "`event_time`"
+                    },
+                    {
+                      "name": "severity",
+                      "expression": "`severity`"
+                    },
+                    {
+                      "name": "operation",
+                      "expression": "`operation`"
+                    },
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "actor",
+                      "expression": "`actor`"
+                    },
+                    {
+                      "name": "target",
+                      "expression": "`target`"
+                    },
+                    {
+                      "name": "detail",
+                      "expression": "`detail`"
+                    },
+                    {
+                      "name": "source_ip",
+                      "expression": "`source_ip`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Sensitive operation events"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "event_time",
+                    "displayName": "Time"
+                  },
+                  {
+                    "fieldName": "severity",
+                    "displayName": "Severity",
+                    "style": {
+                      "type": "basic",
+                      "rules": [
+                        {
+                          "condition": {
+                            "operator": "==",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "HIGH"
+                            }
+                          },
+                          "backgroundColor": "#d03b3b",
+                          "foregroundColor": "#FFFFFF"
+                        },
+                        {
+                          "condition": {
+                            "operator": "==",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "MEDIUM"
+                            }
+                          },
+                          "backgroundColor": "#ec835a",
+                          "foregroundColor": "#0B0B0B"
+                        },
+                        {
+                          "condition": {
+                            "operator": "==",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "LOW"
+                            }
+                          },
+                          "backgroundColor": "#fab219",
+                          "foregroundColor": "#0B0B0B"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "operation",
+                    "displayName": "Operation"
+                  },
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "actor",
+                    "displayName": "Actor"
+                  },
+                  {
+                    "fieldName": "target",
+                    "displayName": "Target"
+                  },
+                  {
+                    "fieldName": "detail",
+                    "displayName": "Detail"
+                  },
+                  {
+                    "fieldName": "source_ip",
+                    "displayName": "Source IP"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 20,
+            "width": 8,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "text_040",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Access footprint (last 90 days)\n",
+                "\n",
+                "Where Databricks is accessed from and by whom. Events without a client IP (requests issued by Databricks compute on behalf of a principal) are excluded from the IP views.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 27,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_041",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_ips",
+                  "fields": [
+                    {
+                      "name": "source_ip",
+                      "expression": "`source_ip`"
+                    },
+                    {
+                      "name": "sum(events)",
+                      "expression": "SUM(`events`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Top source IP addresses"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "source_ip",
+                  "displayName": "Source IP",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(events)",
+                  "displayName": "Requests",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 28,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_042",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_workspaces",
+                  "fields": [
+                    {
+                      "name": "principal",
+                      "expression": "`principal`"
+                    },
+                    {
+                      "name": "sum(workspaces)",
+                      "expression": "SUM(`workspaces`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Principals in the most workspaces"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "principal",
+                  "displayName": "Principal",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(workspaces)",
+                  "displayName": "Workspaces",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 28,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "table_043",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_ips",
+                  "fields": [
+                    {
+                      "name": "source_ip",
+                      "expression": "`source_ip`"
+                    },
+                    {
+                      "name": "ip_range",
+                      "expression": "`ip_range`"
+                    },
+                    {
+                      "name": "access_levels",
+                      "expression": "`access_levels`"
+                    },
+                    {
+                      "name": "principals",
+                      "expression": "`principals`"
+                    },
+                    {
+                      "name": "sample_principals",
+                      "expression": "`sample_principals`"
+                    },
+                    {
+                      "name": "workspaces",
+                      "expression": "`workspaces`"
+                    },
+                    {
+                      "name": "events",
+                      "expression": "`events`"
+                    },
+                    {
+                      "name": "data_access_events",
+                      "expression": "`data_access_events`"
+                    },
+                    {
+                      "name": "failed_events",
+                      "expression": "`failed_events`"
+                    },
+                    {
+                      "name": "first_seen",
+                      "expression": "`first_seen`"
+                    },
+                    {
+                      "name": "last_seen",
+                      "expression": "`last_seen`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "IP addresses used to access Databricks"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "source_ip",
+                    "displayName": "Source IP"
+                  },
+                  {
+                    "fieldName": "ip_range",
+                    "displayName": "Range"
+                  },
+                  {
+                    "fieldName": "access_levels",
+                    "displayName": "Access"
+                  },
+                  {
+                    "fieldName": "principals",
+                    "displayName": "Principals"
+                  },
+                  {
+                    "fieldName": "sample_principals",
+                    "displayName": "Sample principals"
+                  },
+                  {
+                    "fieldName": "workspaces",
+                    "displayName": "Workspaces"
+                  },
+                  {
+                    "fieldName": "events",
+                    "displayName": "Requests"
+                  },
+                  {
+                    "fieldName": "data_access_events",
+                    "displayName": "Data access"
+                  },
+                  {
+                    "fieldName": "failed_events",
+                    "displayName": "Failed"
+                  },
+                  {
+                    "fieldName": "first_seen",
+                    "displayName": "First seen"
+                  },
+                  {
+                    "fieldName": "last_seen",
+                    "displayName": "Last seen"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 34,
+            "width": 7,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "table_044",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_ranges",
+                  "fields": [
+                    {
+                      "name": "ip_range",
+                      "expression": "`ip_range`"
+                    },
+                    {
+                      "name": "access_levels",
+                      "expression": "`access_levels`"
+                    },
+                    {
+                      "name": "ips",
+                      "expression": "`ips`"
+                    },
+                    {
+                      "name": "principals",
+                      "expression": "`principals`"
+                    },
+                    {
+                      "name": "events",
+                      "expression": "`events`"
+                    },
+                    {
+                      "name": "data_access_events",
+                      "expression": "`data_access_events`"
+                    },
+                    {
+                      "name": "last_seen",
+                      "expression": "`last_seen`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "IP ranges (/24) used to access Databricks"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "ip_range",
+                    "displayName": "Range"
+                  },
+                  {
+                    "fieldName": "access_levels",
+                    "displayName": "Access"
+                  },
+                  {
+                    "fieldName": "ips",
+                    "displayName": "IPs"
+                  },
+                  {
+                    "fieldName": "principals",
+                    "displayName": "Principals"
+                  },
+                  {
+                    "fieldName": "events",
+                    "displayName": "Requests"
+                  },
+                  {
+                    "fieldName": "data_access_events",
+                    "displayName": "Data access"
+                  },
+                  {
+                    "fieldName": "last_seen",
+                    "displayName": "Last seen"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 7,
+            "y": 34,
+            "width": 5,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "table_045",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_workspaces",
+                  "fields": [
+                    {
+                      "name": "principal",
+                      "expression": "`principal`"
+                    },
+                    {
+                      "name": "principal_type",
+                      "expression": "`principal_type`"
+                    },
+                    {
+                      "name": "workspaces",
+                      "expression": "`workspaces`"
+                    },
+                    {
+                      "name": "active_days",
+                      "expression": "`active_days`"
+                    },
+                    {
+                      "name": "events",
+                      "expression": "`events`"
+                    },
+                    {
+                      "name": "sample_workspaces",
+                      "expression": "`sample_workspaces`"
+                    },
+                    {
+                      "name": "last_seen",
+                      "expression": "`last_seen`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Workspaces accessed per principal"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "principal",
+                    "displayName": "Principal"
+                  },
+                  {
+                    "fieldName": "principal_type",
+                    "displayName": "Type"
+                  },
+                  {
+                    "fieldName": "workspaces",
+                    "displayName": "Workspaces"
+                  },
+                  {
+                    "fieldName": "active_days",
+                    "displayName": "Active days"
+                  },
+                  {
+                    "fieldName": "events",
+                    "displayName": "Requests"
+                  },
+                  {
+                    "fieldName": "sample_workspaces",
+                    "displayName": "Workspaces (sample)"
+                  },
+                  {
+                    "fieldName": "last_seen",
+                    "displayName": "Last seen"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 41,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "text_046",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Data usage\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 48,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "table_047",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_popular",
+                  "fields": [
+                    {
+                      "name": "table_full_name",
+                      "expression": "`table_full_name`"
+                    },
+                    {
+                      "name": "readers",
+                      "expression": "`readers`"
+                    },
+                    {
+                      "name": "reads",
+                      "expression": "`reads`"
+                    },
+                    {
+                      "name": "writers",
+                      "expression": "`writers`"
+                    },
+                    {
+                      "name": "writes",
+                      "expression": "`writes`"
+                    },
+                    {
+                      "name": "last_access",
+                      "expression": "`last_access`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Most popular data assets",
+                "description": "Reads and writes from lineage, last 90 days",
+                "showDescription": true
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "table_full_name",
+                    "displayName": "Table"
+                  },
+                  {
+                    "fieldName": "readers",
+                    "displayName": "Readers"
+                  },
+                  {
+                    "fieldName": "reads",
+                    "displayName": "Reads"
+                  },
+                  {
+                    "fieldName": "writers",
+                    "displayName": "Writers"
+                  },
+                  {
+                    "fieldName": "writes",
+                    "displayName": "Writes"
+                  },
+                  {
+                    "fieldName": "last_access",
+                    "displayName": "Last access"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 49,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "table_048",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "td_prints",
+                  "fields": [
+                    {
+                      "name": "event_hour",
+                      "expression": "`event_hour`"
+                    },
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "principal",
+                      "expression": "`principal`"
+                    },
+                    {
+                      "name": "events",
+                      "expression": "`events`"
+                    },
+                    {
+                      "name": "notebooks_or_jobs",
+                      "expression": "`notebooks_or_jobs`"
+                    },
+                    {
+                      "name": "sample",
+                      "expression": "`sample`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Print statements",
+                "description": "Commands calling print() (needs verbose audit logs)",
+                "showDescription": true
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "event_hour",
+                    "displayName": "Hour"
+                  },
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "principal",
+                    "displayName": "Principal"
+                  },
+                  {
+                    "fieldName": "events",
+                    "displayName": "Commands"
+                  },
+                  {
+                    "fieldName": "notebooks_or_jobs",
+                    "displayName": "Notebooks / jobs"
+                  },
+                  {
+                    "fieldName": "sample",
+                    "displayName": "Sample command"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 49,
+            "width": 6,
+            "height": 7
+          }
+        }
+      ]
+    },
+    {
       "name": "identity",
       "displayName": "Identity & authentication",
       "pageType": "PAGE_TYPE_CANVAS",
@@ -2120,7 +4083,7 @@
       "layout": [
         {
           "widget": {
-            "name": "text_024",
+            "name": "text_049",
             "multilineTextboxSpec": {
               "lines": [
                 "## 🔐 Identity & authentication\n",
@@ -2138,10 +4101,10 @@
         },
         {
           "widget": {
-            "name": "filter_025",
+            "name": "filter_050",
             "queries": [
               {
-                "name": "filter_025_ia_daily",
+                "name": "filter_050_ia_daily",
                 "query": {
                   "datasetName": "ia_daily",
                   "fields": [
@@ -2154,7 +4117,7 @@
                 }
               },
               {
-                "name": "filter_025_ia_auth",
+                "name": "filter_050_ia_auth",
                 "query": {
                   "datasetName": "ia_auth",
                   "fields": [
@@ -2167,7 +4130,7 @@
                 }
               },
               {
-                "name": "filter_025_ia_failed",
+                "name": "filter_050_ia_failed",
                 "query": {
                   "datasetName": "ia_failed",
                   "fields": [
@@ -2180,7 +4143,7 @@
                 }
               },
               {
-                "name": "filter_025_ia_identity",
+                "name": "filter_050_ia_identity",
                 "query": {
                   "datasetName": "ia_identity",
                   "fields": [
@@ -2193,7 +4156,7 @@
                 }
               },
               {
-                "name": "filter_025_ia_tokens",
+                "name": "filter_050_ia_tokens",
                 "query": {
                   "datasetName": "ia_tokens",
                   "fields": [
@@ -2218,27 +4181,27 @@
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_025_ia_daily"
+                    "queryName": "filter_050_ia_daily"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_025_ia_auth"
+                    "queryName": "filter_050_ia_auth"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_025_ia_failed"
+                    "queryName": "filter_050_ia_failed"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_025_ia_identity"
+                    "queryName": "filter_050_ia_identity"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_025_ia_tokens"
+                    "queryName": "filter_050_ia_tokens"
                   }
                 ]
               }
@@ -2253,10 +4216,10 @@
         },
         {
           "widget": {
-            "name": "filter_026",
+            "name": "filter_051",
             "queries": [
               {
-                "name": "filter_026_ia_daily",
+                "name": "filter_051_ia_daily",
                 "query": {
                   "datasetName": "ia_daily",
                   "fields": [
@@ -2269,7 +4232,7 @@
                 }
               },
               {
-                "name": "filter_026_ia_auth",
+                "name": "filter_051_ia_auth",
                 "query": {
                   "datasetName": "ia_auth",
                   "fields": [
@@ -2282,7 +4245,7 @@
                 }
               },
               {
-                "name": "filter_026_ia_failed",
+                "name": "filter_051_ia_failed",
                 "query": {
                   "datasetName": "ia_failed",
                   "fields": [
@@ -2295,7 +4258,7 @@
                 }
               },
               {
-                "name": "filter_026_ia_identity",
+                "name": "filter_051_ia_identity",
                 "query": {
                   "datasetName": "ia_identity",
                   "fields": [
@@ -2308,7 +4271,7 @@
                 }
               },
               {
-                "name": "filter_026_ia_tokens",
+                "name": "filter_051_ia_tokens",
                 "query": {
                   "datasetName": "ia_tokens",
                   "fields": [
@@ -2333,27 +4296,27 @@
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_026_ia_daily"
+                    "queryName": "filter_051_ia_daily"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_026_ia_auth"
+                    "queryName": "filter_051_ia_auth"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_026_ia_failed"
+                    "queryName": "filter_051_ia_failed"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_026_ia_identity"
+                    "queryName": "filter_051_ia_identity"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_026_ia_tokens"
+                    "queryName": "filter_051_ia_tokens"
                   }
                 ]
               }
@@ -2368,7 +4331,7 @@
         },
         {
           "widget": {
-            "name": "kpi_027",
+            "name": "kpi_052",
             "queries": [
               {
                 "name": "main_query",
@@ -2423,7 +4386,7 @@
         },
         {
           "widget": {
-            "name": "kpi_028",
+            "name": "kpi_053",
             "queries": [
               {
                 "name": "main_query",
@@ -2478,7 +4441,7 @@
         },
         {
           "widget": {
-            "name": "kpi_029",
+            "name": "kpi_054",
             "queries": [
               {
                 "name": "main_query",
@@ -2533,7 +4496,7 @@
         },
         {
           "widget": {
-            "name": "kpi_030",
+            "name": "kpi_055",
             "queries": [
               {
                 "name": "main_query",
@@ -2612,7 +4575,7 @@
         },
         {
           "widget": {
-            "name": "kpi_031",
+            "name": "kpi_056",
             "queries": [
               {
                 "name": "main_query",
@@ -2667,7 +4630,7 @@
         },
         {
           "widget": {
-            "name": "kpi_032",
+            "name": "kpi_057",
             "queries": [
               {
                 "name": "main_query",
@@ -2746,7 +4709,7 @@
         },
         {
           "widget": {
-            "name": "line_033",
+            "name": "line_058",
             "queries": [
               {
                 "name": "main_query",
@@ -2811,7 +4774,7 @@
         },
         {
           "widget": {
-            "name": "bar_034",
+            "name": "bar_059",
             "queries": [
               {
                 "name": "main_query",
@@ -2868,7 +4831,7 @@
         },
         {
           "widget": {
-            "name": "bar_035",
+            "name": "bar_060",
             "queries": [
               {
                 "name": "main_query",
@@ -2927,7 +4890,7 @@
         },
         {
           "widget": {
-            "name": "bar_036",
+            "name": "bar_061",
             "queries": [
               {
                 "name": "main_query",
@@ -2986,7 +4949,7 @@
         },
         {
           "widget": {
-            "name": "bar_037",
+            "name": "bar_062",
             "queries": [
               {
                 "name": "main_query",
@@ -3051,7 +5014,7 @@
         },
         {
           "widget": {
-            "name": "table_038",
+            "name": "table_063",
             "queries": [
               {
                 "name": "main_query",
@@ -3165,7 +5128,7 @@
         },
         {
           "widget": {
-            "name": "table_039",
+            "name": "table_064",
             "queries": [
               {
                 "name": "main_query",
@@ -3247,7 +5210,7 @@
         },
         {
           "widget": {
-            "name": "table_040",
+            "name": "table_065",
             "queries": [
               {
                 "name": "main_query",
@@ -3353,7 +5316,7 @@
       "layout": [
         {
           "widget": {
-            "name": "text_041",
+            "name": "text_066",
             "multilineTextboxSpec": {
               "lines": [
                 "## 🗝️ Data access control\n",
@@ -3371,10 +5334,10 @@
         },
         {
           "widget": {
-            "name": "filter_042",
+            "name": "filter_067",
             "queries": [
               {
-                "name": "filter_042_ac_state",
+                "name": "filter_067_ac_state",
                 "query": {
                   "datasetName": "ac_state",
                   "fields": [
@@ -3387,7 +5350,7 @@
                 }
               },
               {
-                "name": "filter_042_ac_grants",
+                "name": "filter_067_ac_grants",
                 "query": {
                   "datasetName": "ac_grants",
                   "fields": [
@@ -3400,7 +5363,7 @@
                 }
               },
               {
-                "name": "filter_042_ac_owners",
+                "name": "filter_067_ac_owners",
                 "query": {
                   "datasetName": "ac_owners",
                   "fields": [
@@ -3413,7 +5376,7 @@
                 }
               },
               {
-                "name": "filter_042_ac_changes",
+                "name": "filter_067_ac_changes",
                 "query": {
                   "datasetName": "ac_changes",
                   "fields": [
@@ -3438,22 +5401,22 @@
                   {
                     "fieldName": "catalog_name",
                     "displayName": "Catalog",
-                    "queryName": "filter_042_ac_state"
+                    "queryName": "filter_067_ac_state"
                   },
                   {
                     "fieldName": "catalog_name",
                     "displayName": "Catalog",
-                    "queryName": "filter_042_ac_grants"
+                    "queryName": "filter_067_ac_grants"
                   },
                   {
                     "fieldName": "catalog_name",
                     "displayName": "Catalog",
-                    "queryName": "filter_042_ac_owners"
+                    "queryName": "filter_067_ac_owners"
                   },
                   {
                     "fieldName": "catalog_name",
                     "displayName": "Catalog",
-                    "queryName": "filter_042_ac_changes"
+                    "queryName": "filter_067_ac_changes"
                   }
                 ]
               }
@@ -3468,10 +5431,10 @@
         },
         {
           "widget": {
-            "name": "filter_043",
+            "name": "filter_068",
             "queries": [
               {
-                "name": "filter_043_ac_daily",
+                "name": "filter_068_ac_daily",
                 "query": {
                   "datasetName": "ac_daily",
                   "fields": [
@@ -3484,7 +5447,7 @@
                 }
               },
               {
-                "name": "filter_043_ac_changes",
+                "name": "filter_068_ac_changes",
                 "query": {
                   "datasetName": "ac_changes",
                   "fields": [
@@ -3497,7 +5460,7 @@
                 }
               },
               {
-                "name": "filter_043_ac_acl",
+                "name": "filter_068_ac_acl",
                 "query": {
                   "datasetName": "ac_acl",
                   "fields": [
@@ -3510,7 +5473,7 @@
                 }
               },
               {
-                "name": "filter_043_ac_denied",
+                "name": "filter_068_ac_denied",
                 "query": {
                   "datasetName": "ac_denied",
                   "fields": [
@@ -3535,22 +5498,22 @@
                   {
                     "fieldName": "event_date",
                     "displayName": "Date (activity)",
-                    "queryName": "filter_043_ac_daily"
+                    "queryName": "filter_068_ac_daily"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date (activity)",
-                    "queryName": "filter_043_ac_changes"
+                    "queryName": "filter_068_ac_changes"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date (activity)",
-                    "queryName": "filter_043_ac_acl"
+                    "queryName": "filter_068_ac_acl"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date (activity)",
-                    "queryName": "filter_043_ac_denied"
+                    "queryName": "filter_068_ac_denied"
                   }
                 ]
               }
@@ -3565,10 +5528,10 @@
         },
         {
           "widget": {
-            "name": "filter_044",
+            "name": "filter_069",
             "queries": [
               {
-                "name": "filter_044_ac_daily",
+                "name": "filter_069_ac_daily",
                 "query": {
                   "datasetName": "ac_daily",
                   "fields": [
@@ -3581,7 +5544,7 @@
                 }
               },
               {
-                "name": "filter_044_ac_changes",
+                "name": "filter_069_ac_changes",
                 "query": {
                   "datasetName": "ac_changes",
                   "fields": [
@@ -3594,7 +5557,7 @@
                 }
               },
               {
-                "name": "filter_044_ac_acl",
+                "name": "filter_069_ac_acl",
                 "query": {
                   "datasetName": "ac_acl",
                   "fields": [
@@ -3607,7 +5570,7 @@
                 }
               },
               {
-                "name": "filter_044_ac_denied",
+                "name": "filter_069_ac_denied",
                 "query": {
                   "datasetName": "ac_denied",
                   "fields": [
@@ -3632,22 +5595,22 @@
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_044_ac_daily"
+                    "queryName": "filter_069_ac_daily"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_044_ac_changes"
+                    "queryName": "filter_069_ac_changes"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_044_ac_acl"
+                    "queryName": "filter_069_ac_acl"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_044_ac_denied"
+                    "queryName": "filter_069_ac_denied"
                   }
                 ]
               }
@@ -3662,7 +5625,7 @@
         },
         {
           "widget": {
-            "name": "kpi_045",
+            "name": "kpi_070",
             "queries": [
               {
                 "name": "main_query",
@@ -3712,7 +5675,7 @@
         },
         {
           "widget": {
-            "name": "kpi_046",
+            "name": "kpi_071",
             "queries": [
               {
                 "name": "main_query",
@@ -3786,7 +5749,7 @@
         },
         {
           "widget": {
-            "name": "kpi_047",
+            "name": "kpi_072",
             "queries": [
               {
                 "name": "main_query",
@@ -3836,7 +5799,7 @@
         },
         {
           "widget": {
-            "name": "kpi_048",
+            "name": "kpi_073",
             "queries": [
               {
                 "name": "main_query",
@@ -3910,7 +5873,7 @@
         },
         {
           "widget": {
-            "name": "kpi_049",
+            "name": "kpi_074",
             "queries": [
               {
                 "name": "main_query",
@@ -3965,7 +5928,7 @@
         },
         {
           "widget": {
-            "name": "kpi_050",
+            "name": "kpi_075",
             "queries": [
               {
                 "name": "main_query",
@@ -4020,7 +5983,7 @@
         },
         {
           "widget": {
-            "name": "bar_051",
+            "name": "bar_076",
             "queries": [
               {
                 "name": "main_query",
@@ -4088,7 +6051,7 @@
         },
         {
           "widget": {
-            "name": "bar_052",
+            "name": "bar_077",
             "queries": [
               {
                 "name": "main_query",
@@ -4158,7 +6121,7 @@
         },
         {
           "widget": {
-            "name": "line_053",
+            "name": "line_078",
             "queries": [
               {
                 "name": "main_query",
@@ -4232,7 +6195,7 @@
         },
         {
           "widget": {
-            "name": "bar_054",
+            "name": "bar_079",
             "queries": [
               {
                 "name": "main_query",
@@ -4300,7 +6263,7 @@
         },
         {
           "widget": {
-            "name": "table_055",
+            "name": "table_080",
             "queries": [
               {
                 "name": "main_query",
@@ -4432,7 +6395,7 @@
         },
         {
           "widget": {
-            "name": "table_056",
+            "name": "table_081",
             "queries": [
               {
                 "name": "main_query",
@@ -4554,7 +6517,7 @@
         },
         {
           "widget": {
-            "name": "table_057",
+            "name": "table_082",
             "queries": [
               {
                 "name": "main_query",
@@ -4636,7 +6599,7 @@
         },
         {
           "widget": {
-            "name": "table_058",
+            "name": "table_083",
             "queries": [
               {
                 "name": "main_query",
@@ -4734,7 +6697,7 @@
       "layout": [
         {
           "widget": {
-            "name": "text_059",
+            "name": "text_084",
             "multilineTextboxSpec": {
               "lines": [
                 "## 🛡️ Policies & data protection\n",
@@ -4752,10 +6715,10 @@
         },
         {
           "widget": {
-            "name": "filter_060",
+            "name": "filter_085",
             "queries": [
               {
-                "name": "filter_060_po_abac",
+                "name": "filter_085_po_abac",
                 "query": {
                   "datasetName": "po_abac",
                   "fields": [
@@ -4768,7 +6731,7 @@
                 }
               },
               {
-                "name": "filter_060_po_fgc",
+                "name": "filter_085_po_fgc",
                 "query": {
                   "datasetName": "po_fgc",
                   "fields": [
@@ -4781,7 +6744,7 @@
                 }
               },
               {
-                "name": "filter_060_po_sensitive",
+                "name": "filter_085_po_sensitive",
                 "query": {
                   "datasetName": "po_sensitive",
                   "fields": [
@@ -4806,17 +6769,17 @@
                   {
                     "fieldName": "catalog_name",
                     "displayName": "Catalog",
-                    "queryName": "filter_060_po_abac"
+                    "queryName": "filter_085_po_abac"
                   },
                   {
                     "fieldName": "catalog_name",
                     "displayName": "Catalog",
-                    "queryName": "filter_060_po_fgc"
+                    "queryName": "filter_085_po_fgc"
                   },
                   {
                     "fieldName": "catalog_name",
                     "displayName": "Catalog",
-                    "queryName": "filter_060_po_sensitive"
+                    "queryName": "filter_085_po_sensitive"
                   }
                 ]
               }
@@ -4831,10 +6794,10 @@
         },
         {
           "widget": {
-            "name": "filter_061",
+            "name": "filter_086",
             "queries": [
               {
-                "name": "filter_061_po_changes",
+                "name": "filter_086_po_changes",
                 "query": {
                   "datasetName": "po_changes",
                   "fields": [
@@ -4859,7 +6822,7 @@
                   {
                     "fieldName": "event_date",
                     "displayName": "Date (changes)",
-                    "queryName": "filter_061_po_changes"
+                    "queryName": "filter_086_po_changes"
                   }
                 ]
               }
@@ -4874,7 +6837,7 @@
         },
         {
           "widget": {
-            "name": "kpi_062",
+            "name": "kpi_087",
             "queries": [
               {
                 "name": "main_query",
@@ -4922,7 +6885,7 @@
         },
         {
           "widget": {
-            "name": "kpi_063",
+            "name": "kpi_088",
             "queries": [
               {
                 "name": "main_query",
@@ -4970,7 +6933,7 @@
         },
         {
           "widget": {
-            "name": "kpi_064",
+            "name": "kpi_089",
             "queries": [
               {
                 "name": "main_query",
@@ -5018,7 +6981,7 @@
         },
         {
           "widget": {
-            "name": "kpi_065",
+            "name": "kpi_090",
             "queries": [
               {
                 "name": "main_query",
@@ -5068,7 +7031,7 @@
         },
         {
           "widget": {
-            "name": "kpi_066",
+            "name": "kpi_091",
             "queries": [
               {
                 "name": "main_query",
@@ -5142,7 +7105,7 @@
         },
         {
           "widget": {
-            "name": "kpi_067",
+            "name": "kpi_092",
             "queries": [
               {
                 "name": "main_query",
@@ -5192,7 +7155,7 @@
         },
         {
           "widget": {
-            "name": "bar_068",
+            "name": "bar_093",
             "queries": [
               {
                 "name": "main_query",
@@ -5270,7 +7233,7 @@
         },
         {
           "widget": {
-            "name": "bar_069",
+            "name": "bar_094",
             "queries": [
               {
                 "name": "main_query",
@@ -5344,7 +7307,7 @@
         },
         {
           "widget": {
-            "name": "table_070",
+            "name": "table_095",
             "queries": [
               {
                 "name": "main_query",
@@ -5442,7 +7405,7 @@
         },
         {
           "widget": {
-            "name": "table_071",
+            "name": "table_096",
             "queries": [
               {
                 "name": "main_query",
@@ -5540,7 +7503,7 @@
         },
         {
           "widget": {
-            "name": "table_072",
+            "name": "table_097",
             "queries": [
               {
                 "name": "main_query",
@@ -5606,7 +7569,7 @@
         },
         {
           "widget": {
-            "name": "table_073",
+            "name": "table_098",
             "queries": [
               {
                 "name": "main_query",
@@ -5728,7 +7691,7 @@
       "layout": [
         {
           "widget": {
-            "name": "text_074",
+            "name": "text_099",
             "multilineTextboxSpec": {
               "lines": [
                 "## 🏷️ Tags & metadata\n",
@@ -5746,10 +7709,10 @@
         },
         {
           "widget": {
-            "name": "filter_075",
+            "name": "filter_100",
             "queries": [
               {
-                "name": "filter_075_tg_coverage",
+                "name": "filter_100_tg_coverage",
                 "query": {
                   "datasetName": "tg_coverage",
                   "fields": [
@@ -5762,7 +7725,7 @@
                 }
               },
               {
-                "name": "filter_075_tg_gaps",
+                "name": "filter_100_tg_gaps",
                 "query": {
                   "datasetName": "tg_gaps",
                   "fields": [
@@ -5787,12 +7750,12 @@
                   {
                     "fieldName": "catalog_name",
                     "displayName": "Catalog",
-                    "queryName": "filter_075_tg_coverage"
+                    "queryName": "filter_100_tg_coverage"
                   },
                   {
                     "fieldName": "catalog_name",
                     "displayName": "Catalog",
-                    "queryName": "filter_075_tg_gaps"
+                    "queryName": "filter_100_tg_gaps"
                   }
                 ]
               }
@@ -5807,10 +7770,10 @@
         },
         {
           "widget": {
-            "name": "filter_076",
+            "name": "filter_101",
             "queries": [
               {
-                "name": "filter_076_tg_changes",
+                "name": "filter_101_tg_changes",
                 "query": {
                   "datasetName": "tg_changes",
                   "fields": [
@@ -5835,7 +7798,7 @@
                   {
                     "fieldName": "event_date",
                     "displayName": "Date (changes)",
-                    "queryName": "filter_076_tg_changes"
+                    "queryName": "filter_101_tg_changes"
                   }
                 ]
               }
@@ -5850,7 +7813,7 @@
         },
         {
           "widget": {
-            "name": "kpi_077",
+            "name": "kpi_102",
             "queries": [
               {
                 "name": "main_query",
@@ -5898,7 +7861,7 @@
         },
         {
           "widget": {
-            "name": "kpi_078",
+            "name": "kpi_103",
             "queries": [
               {
                 "name": "main_query",
@@ -5948,7 +7911,7 @@
         },
         {
           "widget": {
-            "name": "kpi_079",
+            "name": "kpi_104",
             "queries": [
               {
                 "name": "main_query",
@@ -5998,7 +7961,7 @@
         },
         {
           "widget": {
-            "name": "kpi_080",
+            "name": "kpi_105",
             "queries": [
               {
                 "name": "main_query",
@@ -6046,7 +8009,7 @@
         },
         {
           "widget": {
-            "name": "kpi_081",
+            "name": "kpi_106",
             "queries": [
               {
                 "name": "main_query",
@@ -6094,7 +8057,7 @@
         },
         {
           "widget": {
-            "name": "kpi_082",
+            "name": "kpi_107",
             "queries": [
               {
                 "name": "main_query",
@@ -6144,7 +8107,7 @@
         },
         {
           "widget": {
-            "name": "bar_083",
+            "name": "bar_108",
             "queries": [
               {
                 "name": "main_query",
@@ -6222,7 +8185,7 @@
         },
         {
           "widget": {
-            "name": "bar_084",
+            "name": "bar_109",
             "queries": [
               {
                 "name": "main_query",
@@ -6292,7 +8255,7 @@
         },
         {
           "widget": {
-            "name": "line_085",
+            "name": "line_110",
             "queries": [
               {
                 "name": "main_query",
@@ -6357,7 +8320,7 @@
         },
         {
           "widget": {
-            "name": "bar_086",
+            "name": "bar_111",
             "queries": [
               {
                 "name": "main_query",
@@ -6435,7 +8398,7 @@
         },
         {
           "widget": {
-            "name": "table_087",
+            "name": "table_112",
             "queries": [
               {
                 "name": "main_query",
@@ -6559,7 +8522,7 @@
         },
         {
           "widget": {
-            "name": "table_088",
+            "name": "table_113",
             "queries": [
               {
                 "name": "main_query",
@@ -6689,7 +8652,7 @@
       "layout": [
         {
           "widget": {
-            "name": "text_089",
+            "name": "text_114",
             "multilineTextboxSpec": {
               "lines": [
                 "## 📤 Data activity, exfiltration & sharing\n",
@@ -6707,10 +8670,10 @@
         },
         {
           "widget": {
-            "name": "filter_090",
+            "name": "filter_115",
             "queries": [
               {
-                "name": "filter_090_ex_daily",
+                "name": "filter_115_ex_daily",
                 "query": {
                   "datasetName": "ex_daily",
                   "fields": [
@@ -6723,7 +8686,7 @@
                 }
               },
               {
-                "name": "filter_090_ex_export_daily",
+                "name": "filter_115_ex_export_daily",
                 "query": {
                   "datasetName": "ex_export_daily",
                   "fields": [
@@ -6736,7 +8699,7 @@
                 }
               },
               {
-                "name": "filter_090_ex_exports",
+                "name": "filter_115_ex_exports",
                 "query": {
                   "datasetName": "ex_exports",
                   "fields": [
@@ -6749,7 +8712,7 @@
                 }
               },
               {
-                "name": "filter_090_ex_secrets",
+                "name": "filter_115_ex_secrets",
                 "query": {
                   "datasetName": "ex_secrets",
                   "fields": [
@@ -6762,7 +8725,7 @@
                 }
               },
               {
-                "name": "filter_090_ex_sharing_act",
+                "name": "filter_115_ex_sharing_act",
                 "query": {
                   "datasetName": "ex_sharing_act",
                   "fields": [
@@ -6787,27 +8750,27 @@
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_090_ex_daily"
+                    "queryName": "filter_115_ex_daily"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_090_ex_export_daily"
+                    "queryName": "filter_115_ex_export_daily"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_090_ex_exports"
+                    "queryName": "filter_115_ex_exports"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_090_ex_secrets"
+                    "queryName": "filter_115_ex_secrets"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date",
-                    "queryName": "filter_090_ex_sharing_act"
+                    "queryName": "filter_115_ex_sharing_act"
                   }
                 ]
               }
@@ -6822,10 +8785,10 @@
         },
         {
           "widget": {
-            "name": "filter_091",
+            "name": "filter_116",
             "queries": [
               {
-                "name": "filter_091_ex_daily",
+                "name": "filter_116_ex_daily",
                 "query": {
                   "datasetName": "ex_daily",
                   "fields": [
@@ -6838,7 +8801,7 @@
                 }
               },
               {
-                "name": "filter_091_ex_export_daily",
+                "name": "filter_116_ex_export_daily",
                 "query": {
                   "datasetName": "ex_export_daily",
                   "fields": [
@@ -6851,7 +8814,7 @@
                 }
               },
               {
-                "name": "filter_091_ex_exports",
+                "name": "filter_116_ex_exports",
                 "query": {
                   "datasetName": "ex_exports",
                   "fields": [
@@ -6864,7 +8827,7 @@
                 }
               },
               {
-                "name": "filter_091_ex_secrets",
+                "name": "filter_116_ex_secrets",
                 "query": {
                   "datasetName": "ex_secrets",
                   "fields": [
@@ -6877,7 +8840,7 @@
                 }
               },
               {
-                "name": "filter_091_ex_sharing_act",
+                "name": "filter_116_ex_sharing_act",
                 "query": {
                   "datasetName": "ex_sharing_act",
                   "fields": [
@@ -6902,27 +8865,27 @@
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_091_ex_daily"
+                    "queryName": "filter_116_ex_daily"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_091_ex_export_daily"
+                    "queryName": "filter_116_ex_export_daily"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_091_ex_exports"
+                    "queryName": "filter_116_ex_exports"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_091_ex_secrets"
+                    "queryName": "filter_116_ex_secrets"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_091_ex_sharing_act"
+                    "queryName": "filter_116_ex_sharing_act"
                   }
                 ]
               }
@@ -6937,7 +8900,7 @@
         },
         {
           "widget": {
-            "name": "kpi_092",
+            "name": "kpi_117",
             "queries": [
               {
                 "name": "main_query",
@@ -6994,7 +8957,7 @@
         },
         {
           "widget": {
-            "name": "kpi_093",
+            "name": "kpi_118",
             "queries": [
               {
                 "name": "main_query",
@@ -7051,7 +9014,7 @@
         },
         {
           "widget": {
-            "name": "kpi_094",
+            "name": "kpi_119",
             "queries": [
               {
                 "name": "main_query",
@@ -7106,7 +9069,7 @@
         },
         {
           "widget": {
-            "name": "kpi_095",
+            "name": "kpi_120",
             "queries": [
               {
                 "name": "main_query",
@@ -7185,7 +9148,7 @@
         },
         {
           "widget": {
-            "name": "kpi_096",
+            "name": "kpi_121",
             "queries": [
               {
                 "name": "main_query",
@@ -7235,7 +9198,7 @@
         },
         {
           "widget": {
-            "name": "kpi_097",
+            "name": "kpi_122",
             "queries": [
               {
                 "name": "main_query",
@@ -7307,7 +9270,7 @@
         },
         {
           "widget": {
-            "name": "line_098",
+            "name": "line_123",
             "queries": [
               {
                 "name": "main_query",
@@ -7372,7 +9335,7 @@
         },
         {
           "widget": {
-            "name": "bar_099",
+            "name": "bar_124",
             "queries": [
               {
                 "name": "main_query",
@@ -7442,7 +9405,7 @@
         },
         {
           "widget": {
-            "name": "table_100",
+            "name": "table_125",
             "queries": [
               {
                 "name": "main_query",
@@ -7540,7 +9503,7 @@
         },
         {
           "widget": {
-            "name": "table_101",
+            "name": "table_126",
             "queries": [
               {
                 "name": "main_query",
@@ -7646,7 +9609,7 @@
         },
         {
           "widget": {
-            "name": "table_102",
+            "name": "table_127",
             "queries": [
               {
                 "name": "main_query",
@@ -7672,6 +9635,10 @@
                     {
                       "name": "secret_scope",
                       "expression": "`secret_scope`"
+                    },
+                    {
+                      "name": "secret_key",
+                      "expression": "`secret_key`"
                     },
                     {
                       "name": "events",
@@ -7716,6 +9683,10 @@
                     "displayName": "Scope"
                   },
                   {
+                    "fieldName": "secret_key",
+                    "displayName": "Key"
+                  },
+                  {
                     "fieldName": "events",
                     "displayName": "Events"
                   },
@@ -7736,7 +9707,7 @@
         },
         {
           "widget": {
-            "name": "table_103",
+            "name": "table_128",
             "queries": [
               {
                 "name": "main_query",
@@ -7842,7 +9813,7 @@
       "layout": [
         {
           "widget": {
-            "name": "text_104",
+            "name": "text_129",
             "multilineTextboxSpec": {
               "lines": [
                 "## 🌐 Compute, network & workspace configuration\n",
@@ -7860,10 +9831,10 @@
         },
         {
           "widget": {
-            "name": "filter_105",
+            "name": "filter_130",
             "queries": [
               {
-                "name": "filter_105_cn_network",
+                "name": "filter_130_cn_network",
                 "query": {
                   "datasetName": "cn_network",
                   "fields": [
@@ -7876,7 +9847,7 @@
                 }
               },
               {
-                "name": "filter_105_cn_config_changes",
+                "name": "filter_130_cn_config_changes",
                 "query": {
                   "datasetName": "cn_config_changes",
                   "fields": [
@@ -7901,12 +9872,12 @@
                   {
                     "fieldName": "event_date",
                     "displayName": "Date (network & changes)",
-                    "queryName": "filter_105_cn_network"
+                    "queryName": "filter_130_cn_network"
                   },
                   {
                     "fieldName": "event_date",
                     "displayName": "Date (network & changes)",
-                    "queryName": "filter_105_cn_config_changes"
+                    "queryName": "filter_130_cn_config_changes"
                   }
                 ]
               }
@@ -7921,10 +9892,10 @@
         },
         {
           "widget": {
-            "name": "filter_106",
+            "name": "filter_131",
             "queries": [
               {
-                "name": "filter_106_cn_compute",
+                "name": "filter_131_cn_compute",
                 "query": {
                   "datasetName": "cn_compute",
                   "fields": [
@@ -7937,7 +9908,7 @@
                 }
               },
               {
-                "name": "filter_106_cn_network",
+                "name": "filter_131_cn_network",
                 "query": {
                   "datasetName": "cn_network",
                   "fields": [
@@ -7950,7 +9921,7 @@
                 }
               },
               {
-                "name": "filter_106_cn_config",
+                "name": "filter_131_cn_config",
                 "query": {
                   "datasetName": "cn_config",
                   "fields": [
@@ -7963,7 +9934,7 @@
                 }
               },
               {
-                "name": "filter_106_cn_config_changes",
+                "name": "filter_131_cn_config_changes",
                 "query": {
                   "datasetName": "cn_config_changes",
                   "fields": [
@@ -7988,22 +9959,22 @@
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_106_cn_compute"
+                    "queryName": "filter_131_cn_compute"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_106_cn_network"
+                    "queryName": "filter_131_cn_network"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_106_cn_config"
+                    "queryName": "filter_131_cn_config"
                   },
                   {
                     "fieldName": "workspace_name",
                     "displayName": "Workspace",
-                    "queryName": "filter_106_cn_config_changes"
+                    "queryName": "filter_131_cn_config_changes"
                   }
                 ]
               }
@@ -8018,7 +9989,7 @@
         },
         {
           "widget": {
-            "name": "kpi_107",
+            "name": "kpi_132",
             "queries": [
               {
                 "name": "main_query",
@@ -8066,7 +10037,7 @@
         },
         {
           "widget": {
-            "name": "kpi_108",
+            "name": "kpi_133",
             "queries": [
               {
                 "name": "main_query",
@@ -8140,7 +10111,7 @@
         },
         {
           "widget": {
-            "name": "kpi_109",
+            "name": "kpi_134",
             "queries": [
               {
                 "name": "main_query",
@@ -8212,7 +10183,7 @@
         },
         {
           "widget": {
-            "name": "kpi_110",
+            "name": "kpi_135",
             "queries": [
               {
                 "name": "main_query",
@@ -8284,7 +10255,7 @@
         },
         {
           "widget": {
-            "name": "kpi_111",
+            "name": "kpi_136",
             "queries": [
               {
                 "name": "main_query",
@@ -8332,7 +10303,7 @@
         },
         {
           "widget": {
-            "name": "kpi_112",
+            "name": "kpi_137",
             "queries": [
               {
                 "name": "main_query",
@@ -8406,7 +10377,7 @@
         },
         {
           "widget": {
-            "name": "bar_113",
+            "name": "bar_138",
             "queries": [
               {
                 "name": "main_query",
@@ -8463,7 +10434,7 @@
         },
         {
           "widget": {
-            "name": "bar_114",
+            "name": "bar_139",
             "queries": [
               {
                 "name": "main_query",
@@ -8533,7 +10504,7 @@
         },
         {
           "widget": {
-            "name": "bar_115",
+            "name": "bar_140",
             "queries": [
               {
                 "name": "main_query",
@@ -8611,7 +10582,7 @@
         },
         {
           "widget": {
-            "name": "table_116",
+            "name": "table_141",
             "queries": [
               {
                 "name": "main_query",
@@ -8711,7 +10682,7 @@
         },
         {
           "widget": {
-            "name": "table_117",
+            "name": "table_142",
             "queries": [
               {
                 "name": "main_query",
@@ -8729,6 +10700,10 @@
                     {
                       "name": "actor",
                       "expression": "`actor`"
+                    },
+                    {
+                      "name": "scope",
+                      "expression": "`scope`"
                     },
                     {
                       "name": "setting_name",
@@ -8752,7 +10727,9 @@
               "widgetType": "table",
               "frame": {
                 "showTitle": true,
-                "title": "Security setting changes"
+                "title": "Security setting changes",
+                "description": "Workspace and account (scope ACCOUNT) settings",
+                "showDescription": true
               },
               "encodings": {
                 "columns": [
@@ -8767,6 +10744,10 @@
                   {
                     "fieldName": "actor",
                     "displayName": "Actor"
+                  },
+                  {
+                    "fieldName": "scope",
+                    "displayName": "Scope"
                   },
                   {
                     "fieldName": "setting_name",
@@ -8809,7 +10790,7 @@
         },
         {
           "widget": {
-            "name": "table_118",
+            "name": "table_143",
             "queries": [
               {
                 "name": "main_query",

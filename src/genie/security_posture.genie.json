@@ -12,6 +12,18 @@
           ]
         },
         {
+          "id": "5d1921db546f8305b8fecbbb1fc95e1d",
+          "question": [
+            "Which IP address ranges were used to access Databricks in the last 90 days?"
+          ]
+        },
+        {
+          "id": "77de53616c528b25dcee79e7895011b6",
+          "question": [
+            "Which behavioural detections fired in the last 7 days?"
+          ]
+        },
+        {
           "id": "b043d2b921df65a5c3a8e03d68ba821c",
           "question": [
             "List the HIGH severity findings and what to do about them"
@@ -52,7 +64,7 @@
           "identifier": "${catalog}.${schema}.access_denied_daily"
         },
         {
-          "identifier": "${catalog}.${schema}.activity_kpis_daily"
+          "identifier": "${catalog}.${schema}.access_footprint_daily"
         },
         {
           "identifier": "${catalog}.${schema}.auth_events_daily"
@@ -67,9 +79,6 @@
           "identifier": "${catalog}.${schema}.data_export_events"
         },
         {
-          "identifier": "${catalog}.${schema}.delta_sharing_activity_daily"
-        },
-        {
           "identifier": "${catalog}.${schema}.delta_sharing_posture"
         },
         {
@@ -77,9 +86,6 @@
         },
         {
           "identifier": "${catalog}.${schema}.identity_changes"
-        },
-        {
-          "identifier": "${catalog}.${schema}.network_events_daily"
         },
         {
           "identifier": "${catalog}.${schema}.policy_changes"
@@ -97,10 +103,16 @@
           "identifier": "${catalog}.${schema}.securable_owners"
         },
         {
+          "identifier": "${catalog}.${schema}.security_detections"
+        },
+        {
           "identifier": "${catalog}.${schema}.security_findings_latest"
         },
         {
           "identifier": "${catalog}.${schema}.sensitive_columns"
+        },
+        {
+          "identifier": "${catalog}.${schema}.sensitive_operations"
         },
         {
           "identifier": "${catalog}.${schema}.table_access_activity"
@@ -146,7 +158,13 @@
             "\n",
             "Periods:\n",
             "- \"This week\" = the current ISO week starting Monday (date_trunc('WEEK', current_date())). \"Last week\" = the previous complete Monday-Sunday week. If no period is given for activity questions, use the last 7 days and say so.\n",
-            "- weekly_activity_kpis gives one value per ISO week and metric (all workspaces); activity_kpis_daily gives the same metrics per day and workspace.\n",
+            "- weekly_activity_kpis gives one value per ISO week and metric (all workspaces).\n",
+            "\n",
+            "Threat detections (Databricks Security Reference Architecture queries and alerts):\n",
+            "- security_detections has one row per principal and window (hour or day) above a behavioural rule: repeated failed logins, IP access list failures, repeated access to secrets, repeated unauthorized Unity Catalog / data requests, potential privilege escalation, download / destructive / read-write bursts, print statements, access to multiple workspaces. title and description explain the rule, events / distinct_objects the measure, objects and sample the evidence.\n",
+            "- sensitive_operations lists Terms of Service changes, account settings, account admins, Databricks support access, global init scripts, DBFS mounts, libraries installed on all clusters, open-sharing recipients without IP access list, recipient token lifetime changes, IP-denied sharing queries and host security alerts.\n",
+            "- access_footprint_daily gives, per day, principal, workspace, access level (ACCOUNT / UNITY_CATALOG / WORKSPACE) and client IP, the number of requests: use it for \"which IP addresses / ranges access Databricks\" (ip_range is the /24) and \"who accesses several workspaces\". source_ip is NULL for requests issued by Databricks compute on behalf of the principal: exclude NULL IPs and say so.\n",
+            "- In audit-based tables, workspace_id is the workspace the request came from (Unity Catalog events are logged at account level with the workspace in request parameters); workspace_id 0 means the account console.\n",
             "\n",
             "Posture:\n",
             "- Current findings are in security_findings_latest (one row per failing check and object; mention refreshed_at). check_results gives every check with status PASS / FAIL, findings and the check metadata. posture_score gives the score per category and overall (category = 'ALL'); score is between 0 and 1, score_pct between 0 and 100. posture_trend gives the daily history.\n",
@@ -171,6 +189,20 @@
         }
       ],
       "example_question_sqls": [
+        {
+          "id": "099cb3f9ec17ddb1e280ba9f3887150a",
+          "question": [
+            "Which IP address ranges were used to access Databricks in the last 90 days?"
+          ],
+          "sql": [
+            "SELECT ip_range, count(DISTINCT source_ip) AS ips, count(DISTINCT principal) AS principals,\n",
+            "       array_join(array_sort(collect_set(access_level)), ', ') AS access_levels, sum(events) AS requests, max(event_date) AS last_seen\n",
+            "FROM ${catalog}.${schema}.access_footprint_daily\n",
+            "WHERE event_date > current_date() - 90 AND ip_range IS NOT NULL\n",
+            "GROUP BY ip_range\n",
+            "ORDER BY requests DESC\n"
+          ]
+        },
         {
           "id": "1e0b9ad109b53905c1dd9680c002dff8",
           "question": [
@@ -280,6 +312,20 @@
           ]
         },
         {
+          "id": "78b1956ebc248622b904c09aa0af2c25",
+          "question": [
+            "Which behavioural detections fired in the last 7 days?"
+          ],
+          "sql": [
+            "SELECT title, severity, principal, workspaces, count(*) AS windows, max(events) AS max_events,\n",
+            "       max(distinct_objects) AS max_distinct_objects, max(window_end) AS last_seen, max(sra_query) AS sra_query\n",
+            "FROM ${catalog}.${schema}.security_detections\n",
+            "WHERE event_date >= current_date() - 7 AND detection_id <> 'PRINT_STATEMENTS'\n",
+            "GROUP BY title, severity, principal, workspaces\n",
+            "ORDER BY severity, windows DESC\n"
+          ]
+        },
+        {
           "id": "a05588a0f5142fffd8b8860d34a11098",
           "question": [
             "Who has access to main.finance.transactions?"
@@ -305,6 +351,18 @@
             "GROUP BY principal, workspace_name, export_channel\n",
             "ORDER BY exports DESC\n",
             "LIMIT 20\n"
+          ]
+        },
+        {
+          "id": "ee4e259ea7bb1f05c39cd26118b3cf21",
+          "question": [
+            "List sensitive operations of the last 30 days (Terms of Service, support access, mounts, init scripts ...)"
+          ],
+          "sql": [
+            "SELECT event_time, operation, severity, workspace_name, actor, target, detail\n",
+            "FROM ${catalog}.${schema}.sensitive_operations\n",
+            "WHERE event_date >= current_date() - 30\n",
+            "ORDER BY event_time DESC\n"
           ]
         },
         {

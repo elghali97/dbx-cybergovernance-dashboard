@@ -1,6 +1,6 @@
 <form version="1.1" theme="dark" hideEdit="false">
   <label>Databricks Security - Posture</label>
-  <description>Security posture of the Databricks estate: 32 checks modelled on the Security Analysis Tool, scored and refreshed by the Databricks Security Posture job (every 6 hours by default). Click a check title for the Databricks security best practice, a recommendation for the remediation documentation.</description>
+  <description>Security posture of the Databricks estate: 44 checks modelled on the Security Analysis Tool and the Security Reference Architecture, scored and refreshed by the Databricks Security Posture job (every 6 hours by default). Click a check title for the Databricks security best practice, a recommendation for the remediation documentation.</description>
   <init>
     <!-- Settings: Databricks Add-on account, schema of the Security Posture bundle, optional SQL warehouse (default: the warehouse configured on the add-on account) -->
     <set token="dbx_account">databricks</set>
@@ -75,7 +75,7 @@
         <search base="kpi">
           <query><![CDATA[| eval v=checks_failed | fields v]]></query>
         </search>
-        <option name="underLabel">of 32 checks</option>
+        <option name="underLabel">checks with findings</option>
         <option name="drilldown">none</option>
         <option name="numberPrecision">0</option>
         <option name="height">110</option>
@@ -277,6 +277,9 @@
           </li>
           <li>
             <a href="databricks_security_live">Live activity dashboard</a>
+          </li>
+          <li>
+            <a href="databricks_security_detections">Threat detections dashboard</a>
           </li>
           <li>Ask questions in natural language: the <b>Security Posture Analyst</b> Genie agent in Databricks.</li>
         </ul>

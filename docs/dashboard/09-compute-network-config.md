@@ -1,4 +1,4 @@
-# 8. Compute, network & config
+# 9. Compute, network & config
 
 > Cluster isolation and policies, network policy denials and workspace security settings.
 
@@ -41,5 +41,5 @@ lists disabled · DP-03 data exfiltration setting enabled · IA-03 max token lif
 | Visualization | What it shows | How to read it / act |
 |---|---|---|
 | **Workspace security settings (last known value)** | Per workspace and setting: value, status, last changed, by whom | The configuration baseline. Values are reconstructed from audit changes within retention: a setting never changed in the last 365 days does not appear |
-| **Security setting changes** | Each change: actor, setting, new value, status | Who switched off a control. A risky change is a HIGH signal in the [Splunk live dashboard](../splunk.md) |
+| **Security setting changes** | Each change: actor, scope (WORKSPACE or ACCOUNT), setting, new value, status | Who switched off a control. A risky change is a HIGH signal in the [Splunk live dashboard](../splunk.md) |
 | **Interactive clusters** | Workspace, cluster, owner, access mode, UC-secured, policy, runtime, init scripts | Hand the list to the cluster owners |

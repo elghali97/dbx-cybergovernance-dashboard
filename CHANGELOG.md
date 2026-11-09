@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.0
+
+- **Threat detections** modelled on the Databricks Security Reference Architecture (SRA) queries and alerts
+  ([docs/use-cases.md](docs/use-cases.md)): new dashboard page, `detection_rules` (thresholds) and `security_detections`
+  (repeated failed logins, IP access list failures, repeated access to secrets, repeated unauthorized Unity Catalog and
+  data requests, potential privilege escalation, download / destructive / read-write bursts, print statements, access
+  to multiple workspaces), `sensitive_operations` (Terms of Service, account settings and admins, Databricks support
+  access, global init scripts, DBFS mounts, libraries on all clusters, open-sharing recipients without IP access list,
+  recipient token lifetime, IP-denied sharing queries, compliance security profile host alerts), and two new activity
+  tables: `security_activity_hourly` and `access_footprint_daily` (IP addresses, /24 ranges, workspaces per principal).
+- 12 new checks (44): IA-08, IA-09, AC-07, AC-08, AC-09, DP-05, DP-06, DP-07, CO-04, CO-05, CO-06, DS-03.
+- **Fix:** Unity Catalog and other account-level audit events are now attributed to the workspace they came from
+  (`request_params.workspace_id`); they were shown as account console events.
+- Activity tables are rebuilt when their source view definition changes (definition hash), not only their columns.
+  The first run after this upgrade rebuilds them all.
+- Secret access keeps the secret key; setting changes show their scope (ACCOUNT / WORKSPACE).
+- Splunk: new *Threat detections* dashboard (one panel per SRA use case, refreshed or live source), behavioural
+  detections on the live dashboard, alerts consolidated to three (HIGH signal, behavioural detection, sensitive
+  operation) using the thresholds of `detection_rules`.
+- Genie agent: detections, sensitive operations and the access footprint replace three daily tables (30-table limit).
+
 ## 1.2.0
 
 - **Splunk app** (`splunk/`, [docs/splunk.md](docs/splunk.md)) for Splunk Enterprise with the Databricks Add-on for
