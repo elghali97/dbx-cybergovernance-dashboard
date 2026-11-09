@@ -1,4 +1,4 @@
-Databricks Security Posture for Splunk 1.2.0
+Databricks Security Posture for Splunk 1.3.0
 
 Requires the Databricks Add-on for Splunk (TA-Databricks) with an account named "databricks" and the
 Databricks Security Posture bundle deployed in security.security_posture.

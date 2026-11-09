@@ -1,4 +1,4 @@
-# 4. Data access control
+# 5. Data access control
 
 > Unity Catalog grants and ownership as they are now, how they changed, and who was refused access.
 

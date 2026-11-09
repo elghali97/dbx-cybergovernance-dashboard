@@ -7,14 +7,16 @@
 2. Rebuilds the state tables (Unity Catalog grants, owners, tags, policies, compute) from their src_* view.
 3. Loads the activity tables incrementally: the last --reprocess-days days are replaced atomically
    (INSERT ... REPLACE WHERE), the first load back-fills --events-backfill-days / --activity-backfill-days,
-   rows older than --retention-days are purged. A table whose schema no longer matches its src_* view is rebuilt.
-4. Creates the semantic views and checks (sql/20_*.sql, sql/30_*.sql). The semantic views exist twice: over the
-   materialised events, and as live_* views reading system.access.audit at query time (SEMANTIC_VARIANTS).
+   rows older than --retention-days are purged. A table whose src_* view changed (columns or definition) is rebuilt.
+4. Creates the semantic views, behavioural detections and checks (sql/20_*.sql, 25_*.sql, 30_*.sql). Semantic views and
+   detections exist twice: over the materialised tables, and as live_* views reading system.access.audit at query
+   time (SEMANTIC_VARIANTS).
 5. Creates the live views of the Splunk dashboards (sql/40_*.sql).
 6. Materialises security_findings_latest and the daily posture snapshot.
 """
 import argparse
 import glob
+import hashlib
 import os
 import re
 import time
@@ -69,13 +71,18 @@ ACTIVITY_TABLES = {
     "delta_sharing_activity_daily": "activity",
     "network_events_daily": "activity",
     "table_access_activity": "activity",
+    "security_activity_hourly": "activity",
+    "access_footprint_daily": "activity",
 }
+DEFINITION_PROPERTY = "security_posture.definition_hash"
 
-# Files using ${events} (20_semantic.sql) are rendered once per variant: over the materialised events (dashboard, Genie,
-# checks) and as live_* views over system.access.audit, read at query time by the near real-time Splunk dashboards.
+# Files using ${live} (20_semantic.sql, 25_detections.sql) are rendered once per variant: over the materialised tables
+# (dashboard, Genie, checks) and as live_* views over system.access.audit, read at query time by the Splunk dashboards.
 SEMANTIC_VARIANTS = [
-    {"live": "", "events": "audit_security_events", "live_note": ""},
-    {"live": "live_", "events": "src_audit_security_events",
+    {"live": "", "events": "audit_security_events", "hourly": "security_activity_hourly", "footprint": "access_footprint_daily",
+     "live_note": ""},
+    {"live": "live_", "events": "src_audit_security_events", "hourly": "src_security_activity_hourly",
+     "footprint": "src_access_footprint_daily",
      "live_note": "LIVE view: reads system.access.audit at query time (about 10 minutes behind), always filter on event_date "
                   "and event_time. "},
 ]
@@ -106,9 +113,9 @@ def statements(text):
 
 
 def file_statements(path, catalog, schema, missing_sources=()):
-    """Rendered statements of a SQL file, once per SEMANTIC_VARIANTS entry if it uses ${events}."""
+    """Rendered statements of a SQL file, once per SEMANTIC_VARIANTS entry if it uses ${live}."""
     text = open(path).read()
-    for values in SEMANTIC_VARIANTS if "${events}" in text else [{}]:
+    for values in SEMANTIC_VARIANTS if "${live}" in text else [{}]:
         yield from statements(render(text, catalog, schema, missing_sources, **values))
 
 
@@ -123,6 +130,7 @@ class Refresher:
         self.fq = f"`{args.catalog}`.`{args.schema}`"
         self.timings = []
         self.missing_sources = []
+        self.definitions = {}  # rendered object name -> hash of its CREATE statement
 
     def sql(self, stmt, **params):
         return self.spark.sql(stmt, args=params or None)
@@ -173,6 +181,7 @@ class Refresher:
         failures = []
         for path in sorted(glob.glob(os.path.join(self.args.sql_dir, f"{prefix}*.sql"))):
             for stmt in file_statements(path, self.args.catalog, self.args.schema, self.missing_sources):
+                self.definitions[object_name(stmt)] = hashlib.sha256(stmt.encode()).hexdigest()[:16]
                 try:
                     self.sql(stmt)
                 except Exception as e:
@@ -207,13 +216,23 @@ class Refresher:
                  f"AS SELECT * FROM {self.fq}.src_{name}")
         return f"{self.spark.table(f'{self.fq}.{name}').count()} rows"
 
+    def stored_definition(self, name):
+        # SHOW TBLPROPERTIES t ('key') returns a message row when the key is missing: read all properties instead
+        props = {r["key"]: r["value"] for r in self.sql(f"SHOW TBLPROPERTIES {self.fq}.{name}").collect()}
+        return props.get(DEFINITION_PROPERTY)
+
     def load_activity(self, name, kind):
         backfill = self.args.events_backfill_days if kind == "events" else self.args.activity_backfill_days
         start = date.today() - timedelta(days=backfill)
         src = f"{self.fq}.src_{name}"
+        definition = self.definitions.get(f"{self.args.catalog}.{self.args.schema}.src_{name}", "")
         self.drop_if_view(name)
-        if not self.exists(name) or self.schema_of(name) != self.schema_of(f"src_{name}"):
+        rebuild = (not self.exists(name) or self.schema_of(name) != self.schema_of(f"src_{name}")
+                   or self.stored_definition(name) != definition)
+        if rebuild:
+            # the definition hash makes upgrades re-derive history when a source view changes (not only its columns)
             self.sql(f"CREATE OR REPLACE TABLE {self.fq}.{name} CLUSTER BY (event_date) COMMENT '{self.comment_of(f'src_{name}')}' "
+                     f"TBLPROPERTIES ('{DEFINITION_PROPERTY}' = '{definition}') "
                      f"AS SELECT * FROM {src} WHERE event_date >= DATE'{start}'")
             mode = f"full load from {start}"
         else:
@@ -259,6 +278,7 @@ def main():
     for name, kind in ACTIVITY_TABLES.items():
         r.step(f"activity   {name}", lambda name=name, kind=kind: r.load_activity(name, kind))
     r.step("semantic views", lambda: r.run_sql_files("20_"))
+    r.step("detections", lambda: r.run_sql_files("25_"))
     r.step("checks, score & KPI views", lambda: r.run_sql_files("30_"))
     r.step("live views (Splunk)", lambda: r.run_sql_files("40_"))
     r.step("findings & snapshot", r.refresh_findings)

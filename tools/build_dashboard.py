@@ -119,6 +119,75 @@ DATASETS = {
                object_type, object_name, detail, detected_at, recommendation, best_practice_url, doc_url, refreshed_at
         FROM security_findings_latest
         ORDER BY severity_order, check_id, detected_at DESC"""),
+    # Threat detections (SRA queries and alerts)
+    "td_daily": ("Detections per day", """
+        SELECT event_date,
+          sum(CASE WHEN detection_id IN ('FAILED_LOGIN_BURST', 'IP_ACCESS_DENIED_BURST') THEN 1 ELSE 0 END) AS login_bursts,
+          sum(CASE WHEN detection_id = 'SECRET_ACCESS_BURST' THEN 1 ELSE 0 END) AS secret_bursts,
+          sum(CASE WHEN detection_id IN ('UC_DENIED_BURST', 'UC_DATA_DENIED_BURST') THEN 1 ELSE 0 END) AS denied_bursts,
+          sum(CASE WHEN detection_id = 'PRIVILEGE_ESCALATION' THEN 1 ELSE 0 END) AS escalations,
+          sum(CASE WHEN detection_id IN ('DESTRUCTIVE_BURST', 'DOWNLOAD_BURST', 'READ_WRITE_BURST') THEN 1 ELSE 0 END) AS data_bursts,
+          sum(CASE WHEN detection_id = 'MULTI_WORKSPACE' THEN 1 ELSE 0 END) AS multi_workspace
+        FROM security_detections
+        GROUP BY event_date"""),
+    "td_detections": ("Behavioural detections", """
+        SELECT detection_id, title, severity, severity_order, event_date, window_start, principal, principal_type, events,
+               distinct_objects, array_join(objects, ', ') AS objects, sample, array_join(source_ips, ', ') AS source_ips, workspaces,
+               concat(CASE measure WHEN 'distinct_objects' THEN 'distinct objects' ELSE 'events' END, ' >= ', CAST(threshold AS STRING)) AS rule,
+               sra_query, description
+        FROM security_detections
+        ORDER BY severity_order, window_start DESC"""),
+    "td_sensitive": ("Sensitive operations", """
+        SELECT event_time, event_date, workspace_name, operation, severity, actor, action_name, target, detail, source_ip
+        FROM sensitive_operations
+        ORDER BY event_time DESC"""),
+    "td_ips": ("IP addresses used (90 days)", """
+        SELECT source_ip, ip_range, array_join(array_sort(collect_set(access_level)), ', ') AS access_levels,
+               count(DISTINCT principal) AS principals, count(DISTINCT workspace_id) AS workspaces, sum(events) AS events,
+               sum(data_access_events) AS data_access_events, sum(failed_events) AS failed_events,
+               min(event_date) AS first_seen, max(event_date) AS last_seen,
+               array_join(slice(array_sort(collect_set(principal)), 1, 5), ', ') AS sample_principals
+        FROM access_footprint_daily
+        WHERE source_ip IS NOT NULL AND event_date > current_date() - 90
+        GROUP BY source_ip, ip_range
+        ORDER BY events DESC
+        LIMIT 1000"""),
+    "td_ranges": ("IP ranges used (90 days)", """
+        SELECT ip_range, array_join(array_sort(collect_set(access_level)), ', ') AS access_levels, count(DISTINCT source_ip) AS ips,
+               count(DISTINCT principal) AS principals, count(DISTINCT workspace_id) AS workspaces, sum(events) AS events,
+               sum(data_access_events) AS data_access_events, max(event_date) AS last_seen
+        FROM access_footprint_daily
+        WHERE ip_range IS NOT NULL AND event_date > current_date() - 90
+        GROUP BY ip_range
+        ORDER BY events DESC
+        LIMIT 500"""),
+    "td_workspaces": ("Workspaces per principal (90 days)", """
+        SELECT principal, principal_type, count(DISTINCT workspace_id) AS workspaces, count(DISTINCT event_date) AS active_days,
+               sum(events) AS events, array_join(slice(array_sort(collect_set(workspace_name)), 1, 10), ', ') AS sample_workspaces,
+               max(event_date) AS last_seen
+        FROM access_footprint_daily
+        WHERE workspace_id <> '0' AND event_date > current_date() - 90
+        GROUP BY principal, principal_type
+        HAVING count(DISTINCT workspace_id) > 1
+        ORDER BY workspaces DESC, events DESC
+        LIMIT 500"""),
+    "td_popular": ("Most popular data assets (90 days)", """
+        SELECT table_full_name, catalog_name,
+               count(DISTINCT CASE WHEN access_type = 'READ' THEN principal END) AS readers,
+               sum(CASE WHEN access_type = 'READ' THEN access_events ELSE 0 END) AS reads,
+               count(DISTINCT CASE WHEN access_type = 'WRITE' THEN principal END) AS writers,
+               sum(CASE WHEN access_type = 'WRITE' THEN access_events ELSE 0 END) AS writes,
+               max(last_access_time) AS last_access
+        FROM table_access_activity
+        WHERE event_date > current_date() - 90 AND table_full_name NOT LIKE '__databricks_internal.%'
+        GROUP BY table_full_name, catalog_name
+        ORDER BY reads DESC
+        LIMIT 200"""),
+    "td_prints": ("Print statements (verbose audit logs)", """
+        SELECT event_hour, event_date, workspace_name, principal, events, array_join(objects, ', ') AS notebooks_or_jobs, sample
+        FROM security_activity_hourly
+        WHERE activity = 'PRINT_STATEMENT'
+        ORDER BY event_hour DESC"""),
     # Identity & access
     "ia_daily": ("Identity KPIs per day", kpi_pivot(["sso_logins", "failed_auth", "ip_blocked", "admin_grants", "pats_created", "pats_without_expiry"])),
     "ia_auth": ("Authentication per day", "SELECT event_date, workspace_name, principal, principal_type, auth_category, events, failed_events FROM auth_events_daily"),
@@ -246,7 +315,7 @@ DATASETS = {
     "ex_exports": ("Interactive export events", """
         SELECT event_time, event_date, workspace_name, principal, export_channel, action_name, object_ref, export_format, source_ip
         FROM data_export_events ORDER BY event_time DESC"""),
-    "ex_secrets": ("Secret access per day", "SELECT event_date, workspace_name, principal, principal_type, action_name, secret_scope, events, failures FROM secret_access_daily ORDER BY events DESC"),
+    "ex_secrets": ("Secret access per day", "SELECT event_date, workspace_name, principal, principal_type, action_name, secret_scope, secret_key, events, failures FROM secret_access_daily ORDER BY events DESC"),
     "ex_sharing": ("Delta Sharing recipients", """
         SELECT recipient_name, authentication_type, shares_granted, share_names, ip_allowlist_ranges, token_expiration, recipient_owner,
                CASE WHEN authentication_type = 'TOKEN' THEN 1 ELSE 0 END AS open_recipient,
@@ -282,7 +351,7 @@ DATASETS = {
         FROM workspace_config_latest WHERE is_security_relevant
         ORDER BY is_risky_value DESC, setting_name"""),
     "cn_config_changes": ("Workspace security setting changes", """
-        SELECT event_time, event_date, workspace_name, actor, setting_name, setting_value,
+        SELECT event_time, event_date, workspace_name, actor, scope, setting_name, setting_value,
                CASE WHEN is_risky_value THEN '⚠️ Risky' ELSE '✅ OK' END AS setting_status
         FROM workspace_config_changes WHERE is_security_relevant AND coalesce(status_code, 200) < 400
         ORDER BY event_time DESC"""),
@@ -568,7 +637,73 @@ def build():
     ], "Findings"), 12))
     pages.append(p)
 
-    # 3. Identity & authentication -------------------------------------------------------------
+    # 3. Threat detections (SRA) -----------------------------------------------------------------
+    td = ["td_daily", "td_detections", "td_sensitive", "td_prints"]
+    p = Page("detections", "Threat detections")
+    p.row(2, (header("🚨 Threat detections",
+                     "Behavioural detections and sensitive operations modelled on the Databricks Security Reference Architecture "
+                     "(SRA) queries and alerts: bursts of failed logins, secret reads, refused requests, permission changes, deletions "
+                     "and downloads, access to many workspaces, plus the IP addresses and data used. Thresholds: `detection_rules`."), 6),
+             (date_filter("Date", "event_date", td), 2),
+             (multi_filter("Detection", "title", ["td_detections"]), 2),
+             (multi_filter("Workspace", "workspace_name", ["td_sensitive", "td_prints"]), 2))
+    p.row(3, (daily_counter("td_daily", "login_bursts", "Failed-login bursts", "Failed logins / IP blocks above threshold in an hour",
+                            style=alert_if_positive(MEDIUM)), 2),
+             (daily_counter("td_daily", "secret_bursts", "Secret-read bursts", "10+ distinct secrets read in an hour",
+                            style=alert_if_positive(MEDIUM)), 2),
+             (daily_counter("td_daily", "denied_bursts", "Unauthorized bursts", "Unity Catalog / data requests refused",
+                            style=alert_if_positive(MEDIUM)), 2),
+             (daily_counter("td_daily", "escalations", "Privilege escalation", "25+ permission changes in an hour",
+                            style=alert_if_positive(MEDIUM)), 2),
+             (daily_counter("td_daily", "data_bursts", "Data bursts", "Mass deletes, downloads or read / writes"), 2),
+             (daily_counter("td_daily", "multi_workspace", "Many workspaces", "Principal active in 5+ workspaces in a day"), 2))
+    p.row(6, (bar("td_detections", "title", "count(principal)", "Detections by rule", "Rule", "Detections",
+                  color="severity", color_title="Severity", mappings=SEVERITY_MAPPINGS, color_order=SEVERITY_ORDER), 6),
+             (line("td_detections", "daily(event_date)", "count(principal)", "Detections per day", "Date", "Detections",
+                   color="title", color_title="Rule"), 6))
+    p.row(8, (table("td_detections", [
+        col("window_start", "Window start"), col("severity", "Severity", style=SEVERITY_STYLE),
+        col("title", "Detection", tooltip="{{description}} (SRA: {{sra_query}})"), col("principal", "Principal"),
+        col("workspaces", "Workspaces"), col("events", "Events"), col("distinct_objects", "Distinct objects"), col("rule", "Rule"),
+        col("objects", "Objects (sample)"), col("sample", "Evidence"), col("source_ips", "Source IPs"),
+    ], "Behavioural detections", "One row per principal and window above a rule threshold"), 12))
+    p.row(1, (section("Sensitive operations", "Terms of Service, account settings and admins, Databricks support access, global init "
+                      "scripts, DBFS mounts, libraries on all clusters, open-sharing recipients without IP access list, recipient "
+                      "token lifetime, IP-denied sharing queries, host security alerts."), 12))
+    p.row(7, (bar("td_sensitive", "operation", "count(event_time)", "Sensitive operations by type", "Operation", "Events",
+                  color="severity", color_title="Severity", mappings=SEVERITY_MAPPINGS, color_order=SEVERITY_ORDER), 4),
+             (table("td_sensitive", [col("event_time", "Time"), col("severity", "Severity", style=SEVERITY_STYLE),
+                                     col("operation", "Operation"), col("workspace_name", "Workspace"), col("actor", "Actor"),
+                                     col("target", "Target"), col("detail", "Detail"), col("source_ip", "Source IP")],
+                    "Sensitive operation events"), 8))
+    p.row(1, (section("Access footprint (last 90 days)", "Where Databricks is accessed from and by whom. Events without a client IP "
+                      "(requests issued by Databricks compute on behalf of a principal) are excluded from the IP views."), 12))
+    p.row(6, (bar("td_ips", "source_ip", "sum(events)", "Top source IP addresses", "Source IP", "Requests"), 6),
+             (bar("td_workspaces", "principal", "sum(workspaces)", "Principals in the most workspaces", "Principal", "Workspaces"), 6))
+    p.row(7, (table("td_ips", [col("source_ip", "Source IP"), col("ip_range", "Range"), col("access_levels", "Access"),
+                               col("principals", "Principals"), col("sample_principals", "Sample principals"),
+                               col("workspaces", "Workspaces"), col("events", "Requests"),
+                               col("data_access_events", "Data access"), col("failed_events", "Failed"),
+                               col("first_seen", "First seen"), col("last_seen", "Last seen")],
+                    "IP addresses used to access Databricks"), 7),
+             (table("td_ranges", [col("ip_range", "Range"), col("access_levels", "Access"), col("ips", "IPs"),
+                                  col("principals", "Principals"), col("events", "Requests"),
+                                  col("data_access_events", "Data access"), col("last_seen", "Last seen")],
+                    "IP ranges (/24) used to access Databricks"), 5))
+    p.row(7, (table("td_workspaces", [col("principal", "Principal"), col("principal_type", "Type"), col("workspaces", "Workspaces"),
+                                      col("active_days", "Active days"), col("events", "Requests"),
+                                      col("sample_workspaces", "Workspaces (sample)"), col("last_seen", "Last seen")],
+                    "Workspaces accessed per principal"), 12))
+    p.row(1, (section("Data usage"), 12))
+    p.row(7, (table("td_popular", [col("table_full_name", "Table"), col("readers", "Readers"), col("reads", "Reads"),
+                                   col("writers", "Writers"), col("writes", "Writes"), col("last_access", "Last access")],
+                    "Most popular data assets", "Reads and writes from lineage, last 90 days"), 6),
+             (table("td_prints", [col("event_hour", "Hour"), col("workspace_name", "Workspace"), col("principal", "Principal"),
+                                  col("events", "Commands"), col("notebooks_or_jobs", "Notebooks / jobs"), col("sample", "Sample command")],
+                    "Print statements", "Commands calling print() (needs verbose audit logs)"), 6))
+    pages.append(p)
+
+    # 4. Identity & authentication -------------------------------------------------------------
     ia = ["ia_daily", "ia_auth", "ia_failed", "ia_identity", "ia_tokens"]
     p = Page("identity", "Identity & authentication")
     p.row(2, (header("🔐 Identity & authentication", "Logins, personal access tokens, failed authentication, admin and group changes."), 6),
@@ -723,7 +858,8 @@ def build():
                                    col("shares_granted", "Shares"), col("share_names", "Share names"), col("ip_allowlist_ranges", "IP ranges"),
                                    col("token_expiration", "Token expires"), col("recipient_owner", "Owner")], "Delta Sharing recipients"), 6),
              (table("ex_secrets", [col("event_date", "Date"), col("workspace_name", "Workspace"), col("principal", "Principal"),
-                                   col("action_name", "Action"), col("secret_scope", "Scope"), col("events", "Events"), col("failures", "Failures")],
+                                   col("action_name", "Action"), col("secret_scope", "Scope"), col("secret_key", "Key"), col("events", "Events"),
+                                   col("failures", "Failures")],
                     "Secret access"), 6))
     p.row(6, (table("ex_sharing_act", [col("event_date", "Date"), col("activity_type", "Activity"), col("action_name", "Action"),
                                        col("principal", "Recipient / actor"), col("share_name", "Share"), col("object_name", "Object"),
@@ -754,8 +890,9 @@ def build():
                                   col("last_changed_by", "By")], "Workspace security settings (last known value)",
                     "Reconstructed from audit log changes within retention"), 6),
              (table("cn_config_changes", [col("event_time", "Time"), col("workspace_name", "Workspace"), col("actor", "Actor"),
-                                          col("setting_name", "Setting"), col("setting_value", "Value"),
-                                          col("setting_status", "Status", style=flag_style("⚠️ Risky"))], "Security setting changes"), 6))
+                                          col("scope", "Scope"), col("setting_name", "Setting"), col("setting_value", "Value"),
+                                          col("setting_status", "Status", style=flag_style("⚠️ Risky"))],
+                    "Security setting changes", "Workspace and account (scope ACCOUNT) settings"), 6))
     p.row(7, (table("cn_compute", [col("workspace_name", "Workspace"), col("cluster_name", "Cluster"), col("owned_by", "Owner"),
                                    col("access_mode", "Access mode"), col("uc_secured", "UC secured", style=flag_style("⚠️ No")),
                                    col("policy", "Policy", style=flag_style("⚠️ No")), col("dbr_version", "Runtime"),

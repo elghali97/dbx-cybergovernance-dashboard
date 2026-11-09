@@ -1,4 +1,4 @@
-# 5. Policies & data protection
+# 6. Policies & data protection
 
 > Attribute-based access control (ABAC) policies, column masks, row filters and sensitive data: is sensitive data
 > protected, and did anyone weaken a policy?

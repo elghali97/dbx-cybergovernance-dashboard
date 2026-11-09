@@ -1,6 +1,6 @@
 # 1. Posture overview
 
-> The executive view: one score, the eight security domains and the 32 checks, each linked to the Databricks
+> The executive view: one score, the eight security domains and the 44 checks, each linked to the Databricks
 > security best practice and to the documentation that fixes it.
 
 **For:** CISO and security managers (weekly review, reporting), GRC (control evidence), security engineers (where to
@@ -20,7 +20,7 @@ start).
 | Visualization | What it shows | How to read it / act |
 |---|---|---|
 | **Posture score** | Weighted share of passing checks (HIGH 5, MEDIUM 3, LOW 1), compared with 7 days ago | Green at 80 % or more, red under 50 %. A drop week over week means a new failing check: look at the checks table |
-| **Checks failing** | Checks with at least one finding, out of 32 | The number of controls to remediate, independent of how many objects fail |
+| **Checks failing** | Checks with at least one finding, out of 44 | The number of controls to remediate, independent of how many objects fail |
 | **HIGH findings** | Failing objects of HIGH-severity checks | Fix first: admin rights granted, PATs without expiry, high privilege granted to all users, unprotected sensitive columns, open sharing without IP list, IP access lists disabled |
 | **MEDIUM findings** | Failing objects of MEDIUM-severity checks | Plan remediation with the owners |
 | **Data age** | Hours since the last refresh | Over 6 h (default schedule) means the refresh job failed or is paused: check the job |

@@ -19,6 +19,7 @@ now = int(time.time())
 TOKENS = {"$sp$": f"{os.environ['CATALOG']}.{os.environ['SCHEMA']}", "$t_from$": str(now - 4 * 3600), "$t_to$": str(now),
           "$t_span$": "300", "$ws$": "*", "$actor_like$": "%", "$signals$": "'HIGH','MEDIUM','INFO'",
           "$category$": "*", "$severity$": "*"}
+SP = TOKENS["$sp$"]
 
 
 def fill(sql):
@@ -30,8 +31,12 @@ def fill(sql):
 
 
 statements = [(f"live/{k}", fill(v)) for k, v in b.LIVE_QUERIES.items()]
+# the detections dashboard reads either the refreshed tables or the live views ($src$)
+for source, prefix in (("tables", f"{SP}."), ("live", f"{SP}.live_")):
+    statements += [(f"detections[{source}]/{k}", fill(v.replace("$src$", prefix))) for k, v in b.DETECTION_QUERIES.items()
+                   if "$src$" in v or source == "tables"]
 statements += [(f"posture/{k}", fill(v)) for k, v in b.POSTURE_QUERIES.items()]
-statements += [(f"alert/{name}", fill(query)) for name, _, query, _ in b.ALERTS]
+statements += [(f"alert/{name}", fill(query)) for name, _, query, _, _ in b.ALERTS]
 
 
 def check(item):
@@ -47,5 +52,12 @@ with ThreadPoolExecutor(4) as ex:
         ok = not res.startswith("ERROR")
         bad += not ok
         print(f"{'OK  ' if ok else 'FAIL'} {seconds:>6}s  {name}  {res.splitlines()[-1] if ok else res[:400]}", flush=True)
+# the rules the dashboards and docs name must exist in the deployed detection_rules view
+used = {r for _, _, _, spl, _, _ in b.USE_CASES for r in __import__("re").findall(r'detection_id="(\w+)"', spl)}
+rules = run(f"SELECT detection_id FROM {SP}.detection_rules", 100)
+missing = sorted(r for r in used if r not in rules.split())
+if missing:
+    bad += 1
+    print(f"FAIL detection rules referenced by the Splunk app but not in detection_rules: {missing}")
 print(f"{len(statements) - bad}/{len(statements)} Splunk queries OK")
 sys.exit(1 if bad else 0)

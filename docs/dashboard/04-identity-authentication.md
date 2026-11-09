@@ -1,4 +1,4 @@
-# 3. Identity & authentication
+# 4. Identity & authentication
 
 > Logins, failed authentication, IP blocks, personal access tokens and changes to users, groups and admin rights.
 

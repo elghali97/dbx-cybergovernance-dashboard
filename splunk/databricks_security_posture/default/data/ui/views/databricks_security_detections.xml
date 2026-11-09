@@ -1,0 +1,688 @@
+<form version="1.1" theme="dark" hideEdit="false">
+  <label>Databricks Security - Threat detections</label>
+  <description>One panel per Databricks Security Reference Architecture (SRA) use case, from Databricks system tables: sensitive operations, behavioural detections (thresholds in the detection_rules view of the bundle), secrets, workspaces, IP addresses and ranges, unauthorized Unity Catalog requests, Delta Sharing and data usage. Source: refreshed tables (every 6 hours, up to 90 days) or the live audit log. Click a principal to filter on it.</description>
+  <init>
+    <!-- Settings: Databricks Add-on account, schema of the Security Posture bundle, optional SQL warehouse (default: the warehouse configured on the add-on account) -->
+    <set token="dbx_account">databricks</set>
+    <set token="sp">security.security_posture</set>
+    <set token="dbx_warehouse"> </set>
+  </init>
+  <search id="window">
+    <query><![CDATA[| makeresults | addinfo
+| eval t_to=floor(if(isnum(info_max_time) AND info_max_time < now(), info_max_time, now()))
+| eval t_from=floor(max(info_min_time, now() - 90 * 86400)), range=t_to - t_from
+| eval t_span=case(range <= 7200, 60, range <= 43200, 300, range <= 172800, 900, range <= 691200, 3600, true(), 86400)
+| eval t_span_label=case(t_span == 60, "1m", t_span == 300, "5m", t_span == 900, "15m", t_span == 3600, "1h", true(), "1d")]]></query>
+    <earliest>$time.earliest$</earliest>
+    <latest>$time.latest$</latest>
+    <done>
+      <set token="t_from">$result.t_from$</set>
+      <set token="t_to">$result.t_to$</set>
+      <set token="t_span">$result.t_span$</set>
+      <set token="t_span_label">$result.t_span_label$</set>
+    </done>
+  </search>
+  <search>
+    <query><![CDATA[| makeresults | eval v=$actor|s$
+| eval v=if(len(trim(v)) == 0, "%", replace(replace(v, "['\"\\\\]", ""), "\*", "%"))]]></query>
+    <done>
+      <set token="actor_like">$result.v$</set>
+    </done>
+  </search>
+  <search>
+    <query><![CDATA[| makeresults | eval v="$sp$." . if("$source$" == "live", "live_", "")]]></query>
+    <done>
+      <set token="src">$result.v$</set>
+    </done>
+  </search>
+  <search id="det_sensitive">
+    <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT unix_timestamp(event_time) AS epoch, operation, severity, workspace_name, actor, action_name, target, left(detail, 200) AS detail, source_ip FROM $src$sensitive_operations WHERE event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND event_time >= timestamp_seconds($t_from$) AND event_time < timestamp_seconds($t_to$) AND ('$ws$' = '*' OR workspace_name = '$ws$') AND lower(coalesce(actor, '')) LIKE lower('$actor_like$') ORDER BY event_time DESC LIMIT 5000"]]></query>
+  </search>
+  <search id="det_detections">
+    <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT unix_timestamp(window_start) AS epoch, detection_id, title, severity, principal, concat(array_join(slice(workspace_names, 1, 3), ', '), CASE WHEN size(workspace_names) > 3 THEN concat(' +', CAST(size(workspace_names) - 3 AS STRING), ' more') ELSE '' END) AS workspaces, events, distinct_objects, concat(array_join(slice(objects, 1, 3), ', '), CASE WHEN size(objects) > 3 THEN concat(' +', CAST(size(objects) - 3 AS STRING), ' more') ELSE '' END) AS objects, left(sample, 160) AS sample, concat(array_join(slice(source_ips, 1, 3), ', '), CASE WHEN size(source_ips) > 3 THEN concat(' +', CAST(size(source_ips) - 3 AS STRING), ' more') ELSE '' END) AS source_ips, sra_query FROM $src$security_detections WHERE event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND window_end > timestamp_seconds($t_from$) AND window_start < timestamp_seconds($t_to$) AND ('$ws$' = '*' OR array_contains(workspace_names, '$ws$')) AND lower(principal) LIKE lower('$actor_like$') ORDER BY severity_order, window_start DESC LIMIT 5000"]]></query>
+  </search>
+  <search id="det_activity">
+    <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT activity, principal, count(DISTINCT event_date) AS days, sum(events) AS events, concat(array_join(slice(array_distinct(flatten(collect_list(objects))), 1, 4), ', '), CASE WHEN size(array_distinct(flatten(collect_list(objects)))) > 4 THEN concat(' +', CAST(size(array_distinct(flatten(collect_list(objects)))) - 4 AS STRING), ' more') ELSE '' END) AS sample_objects, size(array_distinct(flatten(collect_list(objects)))) AS distinct_objects_seen, concat(array_join(slice(array_sort(collect_set(workspace_name)), 1, 3), ', '), CASE WHEN size(array_sort(collect_set(workspace_name))) > 3 THEN concat(' +', CAST(size(array_sort(collect_set(workspace_name))) - 3 AS STRING), ' more') ELSE '' END) AS workspaces, left(max(sample), 160) AS sample, max(unix_timestamp(event_hour)) AS last_seen FROM $src$security_activity_hourly WHERE event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND event_hour >= date_trunc('HOUR', timestamp_seconds($t_from$)) AND event_hour < timestamp_seconds($t_to$) AND activity IN ('SECRET_READ', 'UC_DATA_DENIED', 'UC_DENIED', 'PRINT_STATEMENT') AND ('$ws$' = '*' OR workspace_name = '$ws$') AND lower(principal) LIKE lower('$actor_like$') GROUP BY activity, principal ORDER BY events DESC LIMIT 5000"]]></query>
+  </search>
+  <search id="det_ips">
+    <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT source_ip, ip_range, access_level, count(DISTINCT principal) AS principals, sum(events) AS events, sum(data_access_events) AS data_access_events, sum(failed_events) AS failed_events, concat(array_join(slice(array_sort(collect_set(principal)), 1, 3), ', '), CASE WHEN size(array_sort(collect_set(principal))) > 3 THEN concat(' +', CAST(size(array_sort(collect_set(principal))) - 3 AS STRING), ' more') ELSE '' END) AS sample_principals, count(DISTINCT workspace_id) AS workspaces, max(unix_timestamp(CAST(event_date AS TIMESTAMP))) AS last_seen FROM $src$access_footprint_daily WHERE event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND event_date <= CAST(timestamp_seconds($t_to$) AS DATE) AND source_ip IS NOT NULL AND ('$ws$' = '*' OR workspace_name = '$ws$') AND lower(principal) LIKE lower('$actor_like$') GROUP BY source_ip, ip_range, access_level ORDER BY events DESC LIMIT 5000"]]></query>
+  </search>
+  <search id="det_workspaces">
+    <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT principal, principal_type, count(DISTINCT workspace_id) AS workspaces, count(DISTINCT event_date) AS days, sum(events) AS events, concat(array_join(slice(array_sort(collect_set(workspace_name)), 1, 4), ', '), CASE WHEN size(array_sort(collect_set(workspace_name))) > 4 THEN concat(' +', CAST(size(array_sort(collect_set(workspace_name))) - 4 AS STRING), ' more') ELSE '' END) AS sample_workspaces FROM $src$access_footprint_daily WHERE event_date >= CAST(timestamp_seconds($t_from$) AS DATE) AND event_date <= CAST(timestamp_seconds($t_to$) AS DATE) AND workspace_id <> '0' AND lower(principal) LIKE lower('$actor_like$') GROUP BY principal, principal_type HAVING count(DISTINCT workspace_id) > 1 ORDER BY workspaces DESC, events DESC LIMIT 500"]]></query>
+  </search>
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="time" searchWhenChanged="true">
+      <label>Time range (max 90 days)</label>
+      <default>
+        <earliest>-7d@d</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="dropdown" token="source" searchWhenChanged="true">
+      <label>Source</label>
+      <choice value="tables">Refreshed tables (fast, up to 90 days)</choice>
+      <choice value="live">Live audit log (minutes behind, slower)</choice>
+      <default>tables</default>
+    </input>
+    <input type="dropdown" token="ws" searchWhenChanged="true">
+      <label>Workspace</label>
+      <choice value="*">All workspaces</choice>
+      <default>*</default>
+      <fieldForLabel>workspace_name</fieldForLabel>
+      <fieldForValue>workspace_name</fieldForValue>
+      <search>
+        <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT DISTINCT workspace_name FROM $sp$.workspaces WHERE workspace_name IS NOT NULL ORDER BY 1"]]></query>
+      </search>
+    </input>
+    <input type="text" token="actor" searchWhenChanged="true">
+      <label>Principal (* wildcard)</label>
+      <default>*</default>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <title>Behavioural detections</title>
+      <single>
+        <search base="det_detections">
+          <query><![CDATA[| where detection_id!="PRINT_STATEMENTS" | stats count as v]]></query>
+        </search>
+        <option name="underLabel">SRA rules exceeded</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+      </single>
+    </panel>
+    <panel>
+      <title>HIGH / MEDIUM detections</title>
+      <single>
+        <search base="det_detections">
+          <query><![CDATA[| stats count(eval(severity="HIGH" OR severity="MEDIUM")) as v]]></query>
+        </search>
+        <option name="underLabel">to review</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+        <option name="useColors">1</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x0ca30c","0xec835a"]</option>
+        <option name="rangeValues">[0]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Sensitive operations</title>
+      <single>
+        <search base="det_sensitive">
+          <query><![CDATA[| stats count as v]]></query>
+        </search>
+        <option name="underLabel">ToS, settings, init scripts, mounts ...</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+      </single>
+    </panel>
+    <panel>
+      <title>HIGH sensitive operations</title>
+      <single>
+        <search base="det_sensitive">
+          <query><![CDATA[| stats count(eval(severity="HIGH")) as v]]></query>
+        </search>
+        <option name="underLabel">act now</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+        <option name="useColors">1</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x0ca30c","0xd03b3b"]</option>
+        <option name="rangeValues">[0]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Source IPs</title>
+      <single>
+        <search base="det_ips">
+          <query><![CDATA[| stats dc(source_ip) as v]]></query>
+        </search>
+        <option name="underLabel">client IPs seen</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Principals in 2+ workspaces</title>
+      <single>
+        <search base="det_workspaces">
+          <query><![CDATA[| stats count as v]]></query>
+        </search>
+        <option name="underLabel">see access_to_multiple_workspaces</option>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+        <option name="height">110</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>terms_of_service_changes — Terms of Service changes</title>
+      <description>accounts.acceptTos / sendTos (account level).</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="TERMS_OF_SERVICE" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>account_settings_changes — Account settings and account admin changes</title>
+      <description>accounts.setSetting / deleteSetting at account level, setAccountAdmin, changeAccountOwner.</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="ACCOUNT_SETTING" OR operation="ACCOUNT_ADMIN" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>global_init_script_changes — Global init script changes</title>
+      <description>globalInitScripts.create / update / delete (name, enabled, script-SHA256).</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="GLOBAL_INIT_SCRIPT" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>mount_point_creation — DBFS mount point creation</title>
+      <description>dbfs.mount (mountPoint, source). Mounts bypass Unity Catalog.</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="DBFS_MOUNT" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>repeated_access_to_secrets — Repeated access to secrets</title>
+      <description>10+ distinct secrets read by one principal in an hour (secrets.getSecret, scope/key).</description>
+      <table>
+        <search base="det_detections">
+          <query><![CDATA[| where detection_id="SECRET_ACCESS_BURST" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as window_start | appendpipe [| stats count | where count=0 | eval window_start="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>window_start, principal, workspaces, events, distinct_objects, objects, sample, source_ips</fields>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>access_to_secrets — Access to secrets (selected period)</title>
+      <description>Every principal reading secrets (secrets.getSecret): reads, secrets (scope/key) and workspaces.</description>
+      <table>
+        <search base="det_activity">
+          <query><![CDATA[| where activity="SECRET_READ" | eval last_seen=strftime(tonumber(last_seen), "%Y-%m-%d %H:%M") | appendpipe [| stats count | where count=0 | eval principal="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>principal, events, distinct_objects_seen, sample_objects, workspaces, days, last_seen</fields>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>access_to_multiple_workspaces — Access to multiple workspaces</title>
+      <description>Principals active in more than one workspace (workspace = request_params.workspace_id for Unity Catalog events).</description>
+      <table>
+        <search base="det_workspaces">
+          <query><![CDATA[| head 500 | appendpipe [| stats count | where count=0 | eval principal="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>principal, principal_type, workspaces, days, events, sample_workspaces</fields>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>use_of_print_statements — Use of print statements</title>
+      <description>runCommand with print() in commandText: needs verbose audit logs on the workspace.</description>
+      <table>
+        <search base="det_activity">
+          <query><![CDATA[| where activity="PRINT_STATEMENT" | eval last_seen=strftime(tonumber(last_seen), "%Y-%m-%d %H:%M") | appendpipe [| stats count | where count=0 | eval principal="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>principal, events, sample_objects, sample, workspaces, last_seen</fields>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>ip_addresses_used_to_access_databricks — IP addresses used to access Databricks</title>
+      <description>Client IPs of all audit events (source_ip_address, port removed); events issued by Databricks compute carry no client IP.</description>
+      <table>
+        <search base="det_ips">
+          <query><![CDATA[| stats sum(events) as requests sum(data_access_events) as data_access sum(failed_events) as failed max(principals) as principals values(access_level) as access first(sample_principals) as sample_principals max(last_seen) as last_seen by source_ip | sort - requests | eval last_seen=strftime(tonumber(last_seen), "%Y-%m-%d") | eval access=mvjoin(access, ", ") | appendpipe [| stats count | where count=0 | eval source_ip="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">none</option>
+        <fields>source_ip, access, requests, data_access, failed, principals, sample_principals, last_seen</fields>
+      </table>
+    </panel>
+    <panel>
+      <title>ip_address_ranges_used_to_access_databricks — IP address ranges (/24) used to access Databricks</title>
+      <description>IPv4 /24 (IPv6 /48) networks of the client IPs.</description>
+      <table>
+        <search base="det_ips">
+          <query><![CDATA[| stats sum(events) as requests dc(source_ip) as ips max(principals) as principals values(access_level) as access max(last_seen) as last_seen by ip_range | sort - requests | eval last_seen=strftime(tonumber(last_seen), "%Y-%m-%d") | eval access=mvjoin(access, ", ") | appendpipe [| stats count | where count=0 | eval ip_range="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">none</option>
+        <fields>ip_range, access, ips, requests, principals, last_seen</fields>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>repeated_unauthorized_uc_requests — Repeated unauthorized Unity Catalog requests</title>
+      <description>More than 25 Unity Catalog requests refused (status 401 / 403) in an hour.</description>
+      <table>
+        <search base="det_detections">
+          <query><![CDATA[| where detection_id="UC_DENIED_BURST" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as window_start | appendpipe [| stats count | where count=0 | eval window_start="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>window_start, principal, workspaces, events, distinct_objects, objects, sample, source_ips</fields>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>repeated_unauthorized_uc_data_requests — Repeated unauthorized Unity Catalog data requests</title>
+      <description>More than 15 refused generateTemporaryTable/Volume/PathCredential or deltaSharingQueryTable requests in an hour.</description>
+      <table>
+        <search base="det_detections">
+          <query><![CDATA[| where detection_id="UC_DATA_DENIED_BURST" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as window_start | appendpipe [| stats count | where count=0 | eval window_start="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>window_start, principal, workspaces, events, distinct_objects, objects, sample, source_ips</fields>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>unauthorized_uc_data_requests — Unauthorized Unity Catalog data requests (selected period)</title>
+      <description>Every refused data access request (401 / 403) per principal.</description>
+      <table>
+        <search base="det_activity">
+          <query><![CDATA[| where activity="UC_DATA_DENIED" | eval last_seen=strftime(tonumber(last_seen), "%Y-%m-%d %H:%M") | appendpipe [| stats count | where count=0 | eval principal="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>principal, events, distinct_objects_seen, sample_objects, workspaces, days, last_seen</fields>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>delta_sharing_recipients_without_ip_acls — Delta Sharing recipients created without IP access list</title>
+      <description>unityCatalog.createRecipient / updateRecipient with authentication_type TOKEN and no ip_access_list.</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="RECIPIENT_WITHOUT_IP_ACL" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>delta_sharing_ip_access_list_failures — Delta Sharing IP access list failures</title>
+      <description>deltaSharingQueryTable / QueryTableChanges with is_ip_access_denied = true.</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="SHARING_IP_DENIED" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>delta_sharing_recipient_token_lifetime_change — Delta Sharing recipient token lifetime change</title>
+      <description>unityCatalog.updateMetastore with delta_sharing_recipient_token_lifetime_in_seconds.</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="RECIPIENT_TOKEN_LIFETIME" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>most_popular_data_products — Most popular data products</title>
+      <description>Reads and writes per table from lineage (system.access.table_lineage); refreshed tables only.</description>
+      <table>
+        <search base="det_popular">
+          <query><![CDATA[| eval last_access=strftime(tonumber(last_access), "%Y-%m-%d %H:%M") | appendpipe [| stats count | where count=0 | eval table_full_name="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">none</option>
+        <fields>table_full_name, readers, reads, writers, writes, last_access</fields>
+      </table>
+    </panel>
+    <panel>
+      <title>databricks_access_to_customer_workspaces — Databricks support access to workspaces</title>
+      <description>databricksAccess: approver, reason and duration in the detail.</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="DATABRICKS_SUPPORT_ACCESS" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>install_library_on_all_clusters — Libraries installed on all clusters</title>
+      <description>clusterLibraries.installLibraryOnAllClusters.</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="LIBRARY_ON_ALL_CLUSTERS" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>other_behavioural_detections — Other behavioural detections</title>
+      <description>repeated_failed_login_attempts, ip_access_list_failures, potential_privilege_escalation, data_downloads_from_control_plane, destructive_activities, high_number_of_read_writes, access_to_multiple_workspaces (5+ per day).</description>
+      <table>
+        <search base="det_detections">
+          <query><![CDATA[| where detection_id="FAILED_LOGIN_BURST" OR detection_id="IP_ACCESS_DENIED_BURST" OR detection_id="PRIVILEGE_ESCALATION" OR detection_id="DOWNLOAD_BURST" OR detection_id="DESTRUCTIVE_BURST" OR detection_id="READ_WRITE_BURST" OR detection_id="MULTI_WORKSPACE" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as window_start | appendpipe [| stats count | where count=0 | eval window_start="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>window_start, title, principal, workspaces, events, distinct_objects, objects, sample</fields>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>host_security_alerts — Host security alerts (compliance security profile)</title>
+      <description>clamAVScanService-dataplane and capsule8-alerts-dataplane events (compliance security profile only).</description>
+      <table>
+        <search base="det_sensitive">
+          <query><![CDATA[| where operation="ANTIVIRUS_DETECTION" OR operation="HOST_INTRUSION_ALERT" | eval epoch=strftime(tonumber(epoch), "%Y-%m-%d %H:%M") | rename epoch as time | appendpipe [| stats count | where count=0 | eval time="No event in the selected period" | fields - count]]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">cell</option>
+        <fields>time, severity, workspace_name, actor, target, detail, source_ip</fields>
+        <format type="color" field="severity">
+          <colorPalette type="map">{"HIGH":0xd03b3b,"MEDIUM":0xec835a,"LOW":0xfab219,"PASS":0x0ca30c,"FAIL":0xd03b3b}</colorPalette>
+        </format>
+        <drilldown>
+          <condition field="principal">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="actor">
+            <set token="form.actor">$click.value2$</set>
+          </condition>
+          <condition field="*"/>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>Open-sharing recipients without IP access list (current)</title>
+      <description>Current state (system.information_schema): TOKEN recipients with no IP access list.</description>
+      <table>
+        <search>
+          <query><![CDATA[| databricksquery account_name="$dbx_account$" $dbx_warehouse$ command_timeout=300 query="SELECT recipient_name, shares_granted, share_names, token_expiration, recipient_owner, unix_timestamp(created) AS created_epoch FROM $sp$.delta_sharing_posture WHERE authentication_type = 'TOKEN' AND NOT has_ip_allowlist ORDER BY shares_granted DESC" | eval created=strftime(tonumber(created_epoch), "%Y-%m-%d") | fields - created_epoch]]></query>
+        </search>
+        <option name="count">6</option>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="drilldown">none</option>
+        <fields>recipient_name, shares_granted, share_names, token_expiration, recipient_owner, created</fields>
+      </table>
+    </panel>
+  </row>
+</form>

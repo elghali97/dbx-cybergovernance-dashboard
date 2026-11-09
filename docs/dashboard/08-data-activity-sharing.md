@@ -1,4 +1,4 @@
-# 7. Data activity & sharing
+# 8. Data activity & sharing
 
 > Data leaving the platform: downloads and exports by people and automation, secrets usage, and Delta Sharing to
 > external recipients.
@@ -42,7 +42,7 @@ without IP allow-list · DS-02 open-sharing token without expiry.
 |---|---|---|
 | **Interactive export events** | Each export: who, channel, action, object (query, notebook, dashboard, file), format, source IP | The evidence for an insider-risk case |
 | **Delta Sharing recipients** | Recipient, exposure (Databricks-to-Databricks, open with / without IP list), shares, IP ranges, token expiry, owner | Rotate tokens without expiry (DS-02), add IP lists (DS-01), remove unused recipients |
-| **Secret access** | Per day: principal, action, scope, events, failures | Humans reading production secrets, or failures, are worth a question |
+| **Secret access** | Per day: principal, action, scope, key, events, failures | Humans reading production secrets, or failures, are worth a question |
 | **Delta Sharing activity** | Per day: activity type, action, principal / recipient, share, object, events, IP-denied events | What partners actually read; IP-denied events = token used from an unexpected network |
 
 **Near real-time and alerts:** the [Splunk app](../splunk.md) includes a *Mass interactive data export* alert (20+

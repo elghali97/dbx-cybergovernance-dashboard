@@ -1,7 +1,7 @@
 # Security checks
 
-32 checks modelled on the [Security Analysis Tool](https://github.com/databricks-industry-solutions/security-analysis-tool)
-(SAT) best practices, limited to what system tables can show. Each check (`check_results`) carries two links that
+44 checks modelled on the [Security Analysis Tool](https://github.com/databricks-industry-solutions/security-analysis-tool)
+(SAT) best practices and the [Security Reference Architecture (SRA) queries and alerts](use-cases.md), limited to what system tables can show. Each check (`check_results`) carries two links that
 resolve to the cloud of the metastore (docs.databricks.com for AWS / GCP, learn.microsoft.com for Azure):
 
 - `best_practice_url`: the Databricks security best-practice section behind the check. The check title on the
@@ -20,16 +20,24 @@ MEDIUM 3, LOW 1), overall and per category.
 | IA-05 | HIGH | Admin privileges granted | Admin rights / admin-group membership granted in 7 days | INFO-6 |
 | IA-06 | MEDIUM | Repeated authentication failures | ≥ 20 failures per principal / IP per day | IA-1 |
 | IA-07 | LOW | Requests blocked by IP access lists | ≥ 50 blocked requests per IP in 7 days | NS-5 |
+| IA-08 | LOW | Principal active in many workspaces | Principal active in 5+ workspaces on the same day, last 7 days | SRA access_to_multiple_workspaces |
+| IA-09 | LOW | Databricks support access to a workspace | `databricksAccess` logins in 7 days | SRA databricks_access_to_customer_workspaces |
 | AC-01 | HIGH | High privilege granted to all users | ALL PRIVILEGES / MANAGE / MODIFY / CREATE … to all users | GOV-21 |
 | AC-02 | MEDIUM | Catalog / schema open to all users | Direct catalog / schema / metastore grants to all users | GOV-21 |
 | AC-03 | MEDIUM | Powerful privilege granted to an individual | ALL PRIVILEGES / MANAGE granted to a user | GOV-35 |
 | AC-04 | MEDIUM | Critical securable owned by an individual | Catalogs, schemas, locations, credentials, shares … owned by a user | GOV-21 |
 | AC-05 | MEDIUM | New grants to all users | Grants to all users in the last 7 days | GOV-21 |
 | AC-06 | MEDIUM | Metastore privileges held by individuals | Metastore privileges granted to users | GOV-21 |
+| AC-07 | MEDIUM | Repeated unauthorized Unity Catalog requests | More than 25 refused Unity Catalog requests by a principal in an hour, last 7 days | SRA repeated_unauthorized_uc_requests |
+| AC-08 | MEDIUM | Repeated unauthorized data access | More than 15 refused data requests (temporary credentials, Delta Sharing queries) in an hour | SRA repeated_unauthorized_uc_data_requests |
+| AC-09 | MEDIUM | Potential privilege escalation | More than 25 permission changes by a principal in an hour | SRA potential_privilege_escalation |
 | DP-01 | HIGH | Sensitive column without protection | Classified / PII columns with no mask and no ABAC policy | DP-* |
 | DP-02 | MEDIUM | High volume of interactive data exports | ≥ 50 interactive downloads / exports per principal in 7 days | DP-5 |
 | DP-03 | MEDIUM | Data exfiltration setting enabled | Downloads, export, clipboard, DBFS browser, web terminal … enabled | DP-6 |
 | DP-04 | MEDIUM | Secret scope shared with all users | Secret ACL granted to `users` in 90 days | DP-1 |
+| DP-05 | MEDIUM | Repeated access to secrets | 10+ distinct secrets read by a principal in an hour | SRA repeated_access_to_secrets |
+| DP-06 | MEDIUM | Destructive activity burst | More than 50 delete / trash operations by a principal in a day | SRA destructive_activities |
+| DP-07 | LOW | High volume of reads and writes | More than 20 securables read and 20 written by a principal in an hour | SRA high_number_of_read_writes |
 | GT-01 | LOW | Schemas with untagged tables | Tables with no tag (incl. inherited) | – |
 | GT-02 | LOW | Schemas with undocumented tables | Tables without a description | – |
 | GT-03 | MEDIUM | Classification tag removed | Classification / PII tag removed in 7 days | – |
@@ -38,9 +46,13 @@ MEDIUM 3, LOW 1), overall and per category.
 | PO-03 | MEDIUM | Global init script changed | Global init script created / updated / deleted in 7 days | GOV-* |
 | DS-01 | HIGH | Open-sharing recipient without IP allow-list | TOKEN recipient with shares and no IP list | GOV-18 |
 | DS-02 | HIGH | Open-sharing token without expiry | Token never expires or expires in > 365 days | GOV-17 |
+| DS-03 | LOW | Shared data queries denied by IP access list | `deltaSharingQueryTable` refused by a recipient IP list in 7 days | SRA delta_sharing_ip_access_list_failures |
 | CO-01 | MEDIUM | Cluster not secured by Unity Catalog | Interactive cluster in no-isolation / legacy access mode | GOV-* |
 | CO-02 | LOW | Interactive cluster without policy | Interactive cluster without compute policy | GOV-* |
 | CO-03 | MEDIUM | Cluster on unsupported runtime | Interactive cluster on DBR < 13 | GOV-* |
+| CO-04 | MEDIUM | DBFS mount point created | `dbfs.mount` in 7 days (bypasses Unity Catalog) | SRA mount_point_creation |
+| CO-05 | MEDIUM | Library installed on all clusters | `installLibraryOnAllClusters` in 7 days | SRA install_library_on_all_clusters |
+| CO-06 | HIGH | Host security alert | Antivirus or host intrusion alerts (compliance security profile) in 7 days | SRA clam_av / capsule8 |
 | NW-01 | LOW | Inbound requests denied by network policy | Context-based ingress / IP rule denials in 7 days | NS-12 |
 | NW-02 | LOW | Serverless egress blocked | Serverless egress denials in 7 days | NS-14 |
 | AU-01 | MEDIUM | Verbose audit logs disabled | `enableVerboseAuditLogs` = false (last known) | GOV-15 |
@@ -49,7 +61,8 @@ MEDIUM 3, LOW 1), overall and per category.
 ## Customising
 
 - **Thresholds, windows and severities** are in `src/sql/30_findings.sql`: the `security_checks` values and the
-  `security_findings` view, one block per check.
+  `security_findings` view, one block per check. Thresholds of the behavioural checks (IA-08, AC-07 to AC-09, DP-05 to
+  DP-07) are the `detection_rules` view in `src/sql/25_detections.sql`, shared with the dashboard and Splunk.
 - **Adding a check:** add a row to `security_checks` (with a best-practice path and a doc path) and a `UNION ALL`
   block to `security_findings` returning `check_id, workspace_id, workspace_name, object_type, object_name, detail,
   detected_at`. Then redeploy and run the refresh.

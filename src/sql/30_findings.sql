@@ -161,6 +161,66 @@ WITH c AS (
      'Review blocked destinations: possible exfiltration attempt or missing allow-list entry.', 'NS-14',
      'lakehouse-architecture/security-compliance-and-privacy/best-practices#network-security-best-practices',
      'security/network/serverless-network-security/network-policies'),
+    ('IA-08', 'Identity & Access', 'LOW', 'Principal active in many workspaces',
+     'Users or service principals active in 5 or more workspaces on the same day over the last 7 days (lateral movement / blast radius).',
+     'Confirm the access is expected; restrict workspace assignment to the workspaces each principal needs.', 'SRA access_to_multiple_workspaces',
+     'lakehouse-architecture/security-compliance-and-privacy/best-practices#identity-and-access-management-best-practices',
+     'admin/users-groups/'),
+    ('IA-09', 'Identity & Access', 'LOW', 'Databricks support access to a workspace',
+     'Databricks staff logged in to a workspace through the support process (databricksAccess) in the last 7 days.',
+     'Check each access against an open support ticket (approver, reason, duration are in the evidence).', 'SRA databricks_access_to_customer_workspaces',
+     'lakehouse-architecture/security-compliance-and-privacy/best-practices#5-monitor-system-security',
+     'admin/system-tables/audit-logs'),
+    ('AC-07', 'Access Control', 'MEDIUM', 'Repeated unauthorized Unity Catalog requests',
+     'Principals with more than 25 Unity Catalog requests refused (401 / 403) within one hour over the last 7 days.',
+     'Investigate the principal: probing, privilege escalation attempt or a pipeline missing a grant.', 'SRA repeated_unauthorized_uc_requests',
+     'data-governance/unity-catalog/best-practices',
+     'data-governance/unity-catalog/manage-privileges/'),
+    ('AC-08', 'Access Control', 'MEDIUM', 'Repeated unauthorized data access',
+     'Principals with more than 15 data access requests refused (temporary table / volume / path credentials, Delta Sharing queries) within one hour over the last 7 days.',
+     'Investigate the principal and the securables it tried to read: possible exfiltration or privilege escalation attempt.', 'SRA repeated_unauthorized_uc_data_requests',
+     'data-governance/unity-catalog/best-practices',
+     'data-governance/unity-catalog/manage-privileges/'),
+    ('AC-09', 'Access Control', 'MEDIUM', 'Potential privilege escalation',
+     'Principals that made more than 25 permission changes (grants, ACLs, group membership, admin, ownership, tokens) within one hour over the last 7 days.',
+     'Review the changes made by the principal; automate permission management through reviewed infrastructure as code.', 'SRA potential_privilege_escalation',
+     'data-governance/unity-catalog/best-practices#admin-roles-and-powerful-privileges',
+     'data-governance/unity-catalog/manage-privileges/'),
+    ('DP-05', 'Data Protection', 'MEDIUM', 'Repeated access to secrets',
+     'Principals that read 10 or more distinct secrets within one hour over the last 7 days (credential theft).',
+     'Review the secrets read and the principal; restrict secret scope ACLs to the jobs and users that need them.', 'SRA repeated_access_to_secrets',
+     'lakehouse-architecture/security-compliance-and-privacy/best-practices#3-secure-your-data',
+     'security/secrets/'),
+    ('DP-06', 'Data Protection', 'MEDIUM', 'Destructive activity burst',
+     'Principals with more than 50 delete / trash operations in one day over the last 7 days (sabotage or ransomware-like behaviour).',
+     'Confirm the deletions were planned; restrict MANAGE / ownership and keep table history and backups.', 'SRA destructive_activities',
+     'lakehouse-architecture/security-compliance-and-privacy/best-practices#3-secure-your-data',
+     'admin/system-tables/audit-logs'),
+    ('DP-07', 'Data Protection', 'LOW', 'High volume of reads and writes',
+     'Principals that read more than 20 and wrote more than 20 distinct Unity Catalog securables within one hour over the last 7 days (bulk copy / exfiltration pattern).',
+     'Confirm the workload is expected (ETL, migration); otherwise investigate the target locations.', 'SRA high_number_of_read_writes',
+     'lakehouse-architecture/security-compliance-and-privacy/best-practices#3-secure-your-data',
+     'admin/system-tables/audit-logs'),
+    ('CO-04', 'Compute', 'MEDIUM', 'DBFS mount point created',
+     'DBFS mount points created in the last 7 days: mounts bypass Unity Catalog governance.',
+     'Use Unity Catalog external locations and volumes instead of mount points.', 'SRA mount_point_creation',
+     'data-governance/unity-catalog/best-practices',
+     'dbfs/mounts'),
+    ('CO-05', 'Compute', 'MEDIUM', 'Library installed on all clusters',
+     'Libraries installed on every cluster in the last 7 days (anti-pattern: no isolation, hard to audit).',
+     'Use cluster-scoped or notebook-scoped libraries and restrict library sources with an allowlist.', 'SRA install_library_on_all_clusters',
+     'data-governance/unity-catalog/best-practices#compute-configurations',
+     'libraries/cluster-libraries'),
+    ('CO-06', 'Compute', 'HIGH', 'Host security alert',
+     'Antivirus detections or host intrusion alerts (container escape, kernel, host security settings) raised in the last 7 days by the compliance security profile monitoring agents.',
+     'Investigate the instance and the workload that ran on it; contact Databricks support.', 'SRA clam_av / capsule8',
+     'lakehouse-architecture/security-compliance-and-privacy/best-practices#5-monitor-system-security',
+     'security/privacy/enhanced-security-monitoring'),
+    ('DS-03', 'Delta Sharing', 'LOW', 'Shared data queries denied by IP access list',
+     'Delta Sharing queries refused by a recipient IP access list in the last 7 days (shared token used from an unexpected network).',
+     'Check who holds the recipient token and rotate it if it leaked.', 'SRA delta_sharing_ip_access_list_failures',
+     'data-governance/unity-catalog/best-practices#cross-region-and-cross-platform-sharing',
+     'delta-sharing/access-list'),
     ('AU-01', 'Audit & Network', 'MEDIUM', 'Verbose audit logs disabled',
      'Workspaces whose last known enableVerboseAuditLogs setting is false.',
      'Enable verbose audit logs to capture notebook and SQL commands.', 'GOV-15',
@@ -369,6 +429,32 @@ WITH f AS (
   WHERE event_date >= current_date() - 7 AND upper(outcome) IN ('DENY', 'DENIED', 'DROP', 'BLOCK', 'BLOCKED', 'REJECT')
   GROUP BY direction, workspace_id
   UNION ALL
+  -- IA-08 / AC-07 / AC-08 / AC-09 / DP-05 / DP-06 / DP-07 behavioural detections (SRA), last 7 days
+  SELECT CASE detection_id WHEN 'MULTI_WORKSPACE' THEN 'IA-08' WHEN 'UC_DENIED_BURST' THEN 'AC-07' WHEN 'UC_DATA_DENIED_BURST' THEN 'AC-08'
+                           WHEN 'PRIVILEGE_ESCALATION' THEN 'AC-09' WHEN 'SECRET_ACCESS_BURST' THEN 'DP-05' WHEN 'DESTRUCTIVE_BURST' THEN 'DP-06'
+                           ELSE 'DP-07' END,
+         CAST(NULL AS STRING), max(workspaces), 'PRINCIPAL', principal,
+         concat(CAST(count(*) AS STRING), ' window(s), max ', CAST(max(CASE WHEN measure = 'distinct_objects' THEN distinct_objects ELSE events END) AS STRING),
+                ' ', CASE WHEN max(measure) = 'distinct_objects' THEN 'distinct objects' ELSE 'events' END, ' (threshold ', CAST(max(threshold) AS STRING), '), e.g. ',
+                coalesce(array_join(slice(max_by(objects, events), 1, 5), ', '), '')),
+         max(window_end)
+  FROM ${catalog}.${schema}.security_detections
+  WHERE event_date >= current_date() - 7
+    AND detection_id IN ('MULTI_WORKSPACE', 'UC_DENIED_BURST', 'UC_DATA_DENIED_BURST', 'PRIVILEGE_ESCALATION', 'SECRET_ACCESS_BURST',
+                         'DESTRUCTIVE_BURST', 'READ_WRITE_BURST')
+  GROUP BY detection_id, principal
+  UNION ALL
+  -- IA-09 / CO-04 / CO-05 / CO-06 / DS-03 sensitive operations, last 7 days
+  SELECT CASE operation WHEN 'DATABRICKS_SUPPORT_ACCESS' THEN 'IA-09' WHEN 'DBFS_MOUNT' THEN 'CO-04' WHEN 'LIBRARY_ON_ALL_CLUSTERS' THEN 'CO-05'
+                        WHEN 'SHARING_IP_DENIED' THEN 'DS-03' ELSE 'CO-06' END,
+         workspace_id, max(workspace_name), operation, coalesce(target, actor, '?'),
+         concat(CAST(count(*) AS STRING), ' event(s), last: ', max_by(detail, event_time), ' by ', coalesce(max_by(actor, event_time), '?')),
+         max(event_time)
+  FROM ${catalog}.${schema}.sensitive_operations
+  WHERE event_date >= current_date() - 7
+    AND operation IN ('DATABRICKS_SUPPORT_ACCESS', 'DBFS_MOUNT', 'LIBRARY_ON_ALL_CLUSTERS', 'SHARING_IP_DENIED', 'ANTIVIRUS_DETECTION', 'HOST_INTRUSION_ALERT')
+  GROUP BY operation, workspace_id, coalesce(target, actor, '?')
+  UNION ALL
   -- AU-01 / AU-02 audit & IP access list settings
   SELECT CASE WHEN setting_name = 'enableVerboseAuditLogs' THEN 'AU-01' ELSE 'AU-02' END, workspace_id, workspace_name, 'WORKSPACE_SETTING', setting_name,
          concat(setting_name, ' = ', setting_value, ' (changed by ', coalesce(last_changed_by, '?'), ')'), last_changed
@@ -455,7 +541,7 @@ GROUP BY snapshot_date
 ;
 
 CREATE OR REPLACE VIEW ${catalog}.${schema}.activity_kpis_daily
-COMMENT 'Daily security activity KPIs per workspace, one row per (event_date, workspace, metric) with a readable metric_label and metric_order: sso_logins, failed_auth, ip_blocked, admin_grants, identity_changes, pats_created, pats_without_expiry, uc_grants, uc_revokes, broad_grants, acl_changes, access_denied, interactive_exports, automated_exports, secret_reads, secret_failures, policy_changes, policy_deletions, tag_changes, classification_tags_removed, risky_config_changes, sharing_changes, sharing_data_access, sharing_ip_denied, network_denials.'
+COMMENT 'Daily security activity KPIs per workspace, one row per (event_date, workspace, metric) with a readable metric_label and metric_order: sso_logins, failed_auth, ip_blocked, admin_grants, identity_changes, pats_created, pats_without_expiry, uc_grants, uc_revokes, broad_grants, acl_changes, access_denied, interactive_exports, automated_exports, secret_reads, secret_failures, policy_changes, policy_deletions, tag_changes, classification_tags_removed, risky_config_changes, sharing_changes, sharing_data_access, sharing_ip_denied, network_denials, behaviour_detections (all workspaces: workspace_id NULL), sensitive_operations.'
 AS
 WITH m AS (
   SELECT event_date, workspace_id, workspace_name, 'sso_logins' AS metric, sum(events) AS value FROM ${catalog}.${schema}.auth_events_daily WHERE auth_category = 'SSO_BROWSER' GROUP BY ALL
@@ -482,6 +568,8 @@ WITH m AS (
   UNION ALL SELECT event_date, workspace_id, workspace_name, 'sharing_changes' AS metric, sum(CASE WHEN activity_type = 'CHANGE' THEN events ELSE 0 END) AS value FROM ${catalog}.${schema}.delta_sharing_activity_daily GROUP BY ALL
   UNION ALL SELECT event_date, workspace_id, workspace_name, 'sharing_data_access' AS metric, sum(CASE WHEN activity_type = 'DATA_ACCESS' THEN events ELSE 0 END) AS value FROM ${catalog}.${schema}.delta_sharing_activity_daily GROUP BY ALL
   UNION ALL SELECT event_date, workspace_id, workspace_name, 'sharing_ip_denied' AS metric, sum(ip_denied_events) AS value FROM ${catalog}.${schema}.delta_sharing_activity_daily GROUP BY ALL
+  UNION ALL SELECT event_date, CAST(NULL AS STRING), CAST(NULL AS STRING), 'behaviour_detections' AS metric, count(*) AS value FROM ${catalog}.${schema}.security_detections WHERE detection_id <> 'PRINT_STATEMENTS' GROUP BY ALL
+  UNION ALL SELECT event_date, workspace_id, workspace_name, 'sensitive_operations' AS metric, count(*) AS value FROM ${catalog}.${schema}.sensitive_operations GROUP BY ALL
   UNION ALL SELECT event_date, workspace_id, workspace_name, 'network_denials' AS metric, sum(CASE WHEN upper(outcome) IN ('DENY', 'DENIED', 'DROP', 'BLOCK', 'BLOCKED', 'REJECT') THEN events ELSE 0 END) AS value FROM ${catalog}.${schema}.network_events_daily GROUP BY ALL
 ),
 labels AS (
@@ -510,7 +598,9 @@ labels AS (
     ('sharing_changes', 'Delta Sharing changes', 22),
     ('sharing_data_access', 'Delta Sharing data requests', 23),
     ('sharing_ip_denied', 'Delta Sharing IP denials', 24),
-    ('network_denials', 'Network denials', 25)
+    ('network_denials', 'Network denials', 25),
+    ('behaviour_detections', 'Behavioural detections', 26),
+    ('sensitive_operations', 'Sensitive operations', 27)
   AS t(metric, metric_label, metric_order)
 )
 SELECT m.event_date, m.workspace_id, m.workspace_name, m.metric, l.metric_label, l.metric_order, coalesce(m.value, 0) AS value

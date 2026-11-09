@@ -6,13 +6,18 @@
 -- =============================================================================
 
 CREATE OR REPLACE VIEW ${catalog}.${schema}.live_security_events
-COMMENT 'LIVE feed of security-relevant events, one row per audit event, read from system.access.audit at query time (about 10 minutes behind): authentication failures and IP blocks, identity / admin changes, PAT lifecycle, IP access list changes, Unity Catalog grants and revokes, workspace object ACL and secret changes, tag changes, policy changes, Delta Sharing changes, interactive data exports and workspace setting changes. category groups them; signal is HIGH (act now, successful changes only: admin granted, PAT without expiry, high privilege granted to all users, IP access list deleted, ABAC policy deleted, open-sharing token retrieved), MEDIUM (review) or INFO. target is the object affected, detail a short description. Always filter on event_date and event_time. The live_* topic views give the same events with full detail (one row per privilege, setting, tag).'
+COMMENT 'LIVE feed of security-relevant events, one row per audit event, read from system.access.audit at query time (about 10 minutes behind): sensitive operations (Terms of Service, account admin, Databricks support access, DBFS mounts, libraries on all clusters, recipient token lifetime, IP-denied sharing queries, host security alerts), account setting changes, authentication failures and IP blocks, identity / admin changes, PAT lifecycle, IP access list changes, Unity Catalog grants and revokes, workspace object ACL and secret changes, tag changes, policy changes, Delta Sharing changes, interactive data exports and workspace setting changes. category groups them; signal is HIGH (act now, successful changes only: admin granted, PAT without expiry, high privilege granted to all users, IP access list deleted, ABAC policy deleted, open-sharing token retrieved), MEDIUM (review) or INFO. target is the object affected, detail a short description. Always filter on event_date and event_time. The live_* topic views give the same events with full detail (one row per privilege, setting, tag).'
 AS
 -- One scan of the audit log (a UNION of the live_* topic views would scan it once per topic). The rules mirror the
 -- topic views of 20_semantic.sql: keep both in sync.
 WITH e AS (
   SELECT e.*,
     CASE
+      WHEN e.action_name IN ('acceptTos', 'sendTos', 'databricksAccess', 'mount', 'installLibraryOnAllClusters', 'setAccountAdmin',
+                             'changeAccountOwner', 'updateMetastore')
+        OR e.service_name IN ('clamAVScanService-dataplane', 'capsule8-alerts-dataplane')
+        OR (e.action_name IN ('deltaSharingQueryTable', 'deltaSharingQueryTableChanges') AND e.request_params.is_ip_access_denied = 'true')
+        THEN 'Sensitive operation'
       WHEN e.service_name IN ('accounts', 'workspace') AND e.status_code >= 400 AND e.action_name IN ('IpAccessDenied', 'accountIpAclsValidationFailed')
         THEN 'IP access blocked'
       WHEN e.service_name IN ('accounts', 'workspace') AND e.status_code >= 400 AND e.action_name IN (
@@ -23,6 +28,9 @@ WITH e AS (
         THEN 'Token'
       WHEN e.service_name = 'accounts' AND e.action_name IN ('createIpAccessList', 'updateIpAccessList', 'deleteIpAccessList', 'replaceIpAccessList')
         THEN 'IP access list'
+      WHEN e.audit_level = 'ACCOUNT_LEVEL' AND e.action_name IN ('setSetting', 'deleteSetting')
+           AND coalesce(e.request_params.settingTypeName, '') NOT RLIKE 'AclsInitializedForOrg$|^backfill'
+        THEN 'Account setting'
       WHEN (e.service_name = 'workspace' AND e.action_name = 'workspaceConfEdit')
         OR (e.service_name IN ('workspace', 'accounts') AND e.action_name IN ('setSetting', 'deleteSetting')
             AND coalesce(e.request_params.settingTypeName, '') NOT RLIKE 'AclsInitializedForOrg$|^backfill')
@@ -92,6 +100,12 @@ SELECT
     WHEN c.category = 'IP access list' AND c.action_name = 'deleteIpAccessList' THEN 'HIGH'
     WHEN c.category = 'Policy' AND c.action_name = 'deletePolicy' THEN 'HIGH'
     WHEN c.category = 'Delta Sharing' AND c.action_name = 'retrieveRecipientToken' THEN 'HIGH'
+    WHEN c.category = 'Delta Sharing' AND c.action_name IN ('createRecipient', 'updateRecipient')
+         AND upper(coalesce(c.request_params.authentication_type, '')) = 'TOKEN'
+         AND coalesce(c.request_params.ip_access_list, '') IN ('', '[]', '{}') THEN 'HIGH'
+    WHEN c.category = 'Sensitive operation' AND (c.action_name IN ('setAccountAdmin', 'changeAccountOwner')
+         OR c.service_name IN ('clamAVScanService-dataplane', 'capsule8-alerts-dataplane')) THEN 'HIGH'
+    WHEN c.category IN ('Sensitive operation', 'Account setting') THEN 'MEDIUM'
     WHEN c.category IN ('Authentication failure', 'IP access blocked', 'IP access list', 'Workspace setting') THEN 'MEDIUM'
     WHEN c.category = 'Identity & admin' AND c.is_privileged THEN 'MEDIUM'
     WHEN c.category = 'Token' AND c.action_name = 'generateDbToken'
@@ -109,13 +123,24 @@ SELECT
        ELSE coalesce(c.actor, c.run_by) END AS actor,
   c.service_name, c.action_name,
   coalesce(
-    c.request_params.securable_full_name, c.request_params.targetUserName, c.request_params.targetGroupName,
+    c.request_params.securable_full_name, c.request_params.mountPoint, c.request_params.instanceId, c.request_params.targetUserName, c.request_params.targetGroupName,
     c.request_params.aclChangeResourceName, c.request_params.settingTypeName, c.request_params.workspaceConfKeys,
     get_json_object(c.request_params.policy_info, '$.name'), c.request_params.ipAccessListId, c.request_params.scope,
     c.request_params.notebookFullPath, c.request_params.path, c.request_params.name, c.request_params.share,
     c.request_params.principal_id, c.request_params.tokenHash, c.request_params.queryId, c.request_params.dashboard_id,
     c.request_params.space_id, c.request_params.clusterId, c.request_params.jobId) AS target,
   left(coalesce(
+    CASE WHEN c.category = 'Sensitive operation' THEN CASE
+      WHEN c.action_name = 'databricksAccess' THEN concat_ws(' · ', concat('Databricks support login by ', c.request_params.user),
+           concat('approver ', c.request_params.approver), concat('reason ', c.request_params.reason), concat('duration ', c.request_params.duration))
+      WHEN c.action_name = 'mount' THEN concat_ws(' · ', concat('DBFS mount ', c.request_params.mountPoint), concat('source ', c.request_params.source))
+      WHEN c.action_name = 'installLibraryOnAllClusters' THEN concat('library on all clusters: ', c.request_params.library)
+      WHEN c.action_name = 'updateMetastore' THEN concat('recipient token lifetime: ',
+           coalesce(c.request_params.delta_sharing_recipient_token_lifetime_in_seconds, '?'), ' s')
+      WHEN c.action_name IN ('acceptTos', 'sendTos') THEN concat('Terms of Service ', c.action_name)
+      WHEN c.action_name LIKE 'deltaSharingQuery%' THEN concat('shared data query denied by IP access list, recipient ', c.request_params.recipient_name)
+      WHEN c.service_name IN ('clamAVScanService-dataplane', 'capsule8-alerts-dataplane') THEN concat_ws(' · ', c.action_name, c.response_result)
+    END END,
     c.error_message,
     CASE WHEN c.grants IS NOT NULL THEN array_join(transform(c.grants, g -> concat(g.principal,
       CASE WHEN size(coalesce(g.add, array())) > 0 THEN concat(' +', array_join(g.add, ',')) ELSE '' END,
@@ -170,4 +195,14 @@ SELECT n.event_time, CAST(n.event_time AS DATE) AS event_date, n.workspace_id, w
 FROM n
 LEFT JOIN ${catalog}.${schema}.workspaces w ON w.workspace_id = n.workspace_id
 WHERE upper(n.outcome) IN ('DENY', 'DENIED', 'DROP', 'BLOCK', 'BLOCKED', 'REJECT')
+;
+
+CREATE OR REPLACE VIEW ${catalog}.${schema}.live_security_activity_hourly
+COMMENT 'LIVE hourly activity per principal and workspace for behavioural detections (same columns as security_activity_hourly), read from system.access.audit at query time. Always filter on event_date and event_hour.'
+AS SELECT * FROM ${catalog}.${schema}.src_security_activity_hourly
+;
+
+CREATE OR REPLACE VIEW ${catalog}.${schema}.live_access_footprint_daily
+COMMENT 'LIVE daily access footprint per principal, workspace, access level and client IP (same columns as access_footprint_daily), read from system.access.audit at query time. Always filter on event_date.'
+AS SELECT * FROM ${catalog}.${schema}.src_access_footprint_daily
 ;
